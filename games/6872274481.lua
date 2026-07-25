@@ -663,43 +663,20 @@ entitylib.start()
 
 -- pistonware funcs
 
-local function getPingSec()
-    local ping = 100
-    pcall(function()
-        local stats = game:GetService("Stats")
-        local pingStat = stats.Network.ServerStatsItem:FindFirstChild("NetworkPing")
-        if pingStat and pingStat.GetValue then
-            ping = pingStat:GetValue()
-        else
-            ping = lplr:GetNetworkPing() * 1000
-        end
-    end)
-    return math.max(ping, 30) / 1000 -- Minimum 30ms to prevent zero-division
-end
-
 local genv = getgenv()
-genv.AntiLagbackDelayFactor = genv.AntiLagbackDelayFactor or 1
-genv.IsLongJumping = genv.IsLongJumping or false
-genv.ProjectileAuraFiring = genv.ProjectileAuraFiring or false
-genv.LongJumpFireballThrown = genv.LongJumpFireballThrown or false
-genv.ItemOwner = genv.ItemOwner or "none"              -- <<< ADD
-genv.ProjectileAuraFiringLock = genv.ProjectileAuraFiringLock or false  -- <<< ADD
-
-local function Prediction(root)
-	if not root or not root.Parent then 
-		return Vector3.zero 
+-- Idempotent shared-state defaults: fill a key only if a previous execution
+-- hasn't already set it. Add new flags here instead of another line below.
+-- (== nil, not `or`, so a stored `false` is never clobbered back to default.)
+for key, default in pairs({
+	AntiLagbackDelayFactor   = 1,
+	IsLongJumping            = false,
+	LongJumpFireballThrown   = false,
+	ItemOwner                = "none",
+	ProjectileAuraFiringLock = false,
+}) do
+	if genv[key] == nil then
+		genv[key] = default
 	end
-
-	local humanoid = root.Parent:FindFirstChildOfClass("Humanoid")
-	local predicted = root.Position
-
-	if humanoid then
-		predicted += humanoid.MoveDirection
-	end
-
-	predicted += root.Velocity * 0.017 -- - Vector3.new(0, 0.3, 0)
-
-	return predicted
 end
 
 local function ensureCharPrimaryPart(char)
@@ -835,6 +812,8 @@ run(function()
 
 	bedwars = setmetatable({
 		AbilityController = Flamework.resolveDependency('@easy-games/game-core:client/controllers/ability/ability-controller@AbilityController'),
+		AdetundeUpgradeMeta = require(replicatedStorage.TS.games.bedwars.items['frosty-hammer']['frosty-hammer-upgrades']).FrostyHammerUpgradeMeta,
+		AdetundeUtil = require(replicatedStorage.TS.games.bedwars.items['frosty-hammer']['frosty-hammer-util']).FrostyHammerUtil,
 		AnimationType = require(replicatedStorage.TS.animation['animation-type']).AnimationType,
 		AnimationUtil = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out['shared'].util['animation-util']).AnimationUtil,
 		AppController = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out.client.controllers['app-controller']).AppController,
@@ -1746,7 +1725,6 @@ run(function()
 							local rayRange = (attackRange or 14.4)
 							local ray = bedwars.QueryUtil:raycast(unit.Origin, unit.Direction * 200, rayParams)
 							if ray and (localPos - ray.Instance.Position).Magnitude <= rayRange then
-								local limit = (attackRange)
 								for _, ent in entitylib.List do
 									doAttack = ent.Targetable and ray.Instance:IsDescendantOf(ent.Character) and (localPos - ent.RootPart.Position).Magnitude <= rayRange
 									if doAttack then
@@ -2036,9 +2014,11 @@ run(function()
 
 				Fly:Clean(runService.PreSimulation:Connect(function(dt)
 					if entitylib.isAlive and isnetworkowner(entitylib.character.RootPart) then
-						local flyAllowed = (lplr.Character:GetAttribute('InflatedBalloons') and lplr.Character:GetAttribute('InflatedBalloons') > 0) or store.matchState == 2
+						local char = entitylib.character
+						local balloons = lplr.Character:GetAttribute('InflatedBalloons')  -- one attribute read, not two
+						local flyAllowed = (balloons and balloons > 0) or store.matchState == 2
 						local mass = (1.5 + (flyAllowed and 6 or 0) * (os.clock() % 0.4 < 0.2 and -1 or 1)) + ((up + down) * VerticalValue.Value)
-						local root, moveDirection = entitylib.character.RootPart, entitylib.character.Humanoid.MoveDirection
+						local root, moveDirection = char.RootPart, char.Humanoid.MoveDirection
 						local velo = getSpeed()
 						local destination = (moveDirection * math.max(Value.Value - velo, 0) * dt)
 						rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera, AntiFallPart}
@@ -2306,6 +2286,7 @@ run(function()
 	local Targets
 	local FOV
 	local OtherProjectiles
+	local Blacklist
 	local rayCheck = RaycastParams.new()
 	rayCheck.FilterType = Enum.RaycastFilterType.Include
 	rayCheck.FilterDescendantsInstances = {workspace:FindFirstChild('Map')}
@@ -2322,6 +2303,17 @@ run(function()
 		return name ~= nil and (name == 'Falcon' or name:match('^Falcon%-') ~= nil)
 	end
 
+	-- Same blacklist system as ProjectileAura: case-insensitive substring match of
+	-- the projectile type against each enabled "Blacklist Items" entry (e.g. telepearl).
+	local function isBlacklisted(projName)
+		if type(projName) ~= "string" or not Blacklist then return false end
+		local lower = projName:lower()
+		for _, name in ipairs(Blacklist.ListEnabled) do
+			if lower:find(name:lower()) then return true end
+		end
+		return false
+	end
+
 	local ProjectileAimbot = vape.Categories.Blatant:CreateModule({
 		Name = 'ProjectileAimbot',
 		Function = function(callback)
@@ -2329,6 +2321,7 @@ run(function()
 				old = bedwars.ProjectileController.calculateImportantLaunchValues
 				bedwars.ProjectileController.calculateImportantLaunchValues = function(...)
 					local self, projmeta, worldmeta, origin, shootpos = ...
+					if isBlacklisted(projmeta.projectile) then return old(...) end
 					local plr = entitylib.EntityMouse({
 						Part = 'RootPart',
 						Range = FOV.Value,
@@ -2442,6 +2435,10 @@ run(function()
 		Name = 'Other Projectiles',
 		Default = true
 	})
+	Blacklist = ProjectileAimbot:CreateTextList({
+		Name = 'Blacklist Items',
+		Default = {'telepearl'}
+	})
 end)
 	
 run(function()
@@ -2466,11 +2463,13 @@ run(function()
 				Speed:Clean(runService.PreSimulation:Connect(function(dt)
 					bedwars.StatefulEntityKnockbackController.lastImpulseTime = callback and math.huge or time()
 						if entitylib.isAlive and not Fly.Enabled and not vape.Modules.LongJump.Enabled and isnetworkowner(entitylib.character.RootPart) then
-						local state = entitylib.character.Humanoid:GetState()
+						local char = entitylib.character
+						local hum = char.Humanoid
+						local state = hum:GetState()
 						if state == Enum.HumanoidStateType.Climbing then return end
-	
-						local root, velo = entitylib.character.RootPart, getSpeed()
-						local moveDirection = AntiFallDirection or entitylib.character.Humanoid.MoveDirection
+
+						local root, velo = char.RootPart, getSpeed()
+						local moveDirection = AntiFallDirection or hum.MoveDirection
 						local destination = (moveDirection * math.max(Value.Value - velo, 0) * dt)
 	
 						if WallCheck.Enabled then
@@ -2485,7 +2484,7 @@ run(function()
 						root.CFrame += destination
 						root.AssemblyLinearVelocity = (moveDirection * velo) + Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
 						if AutoJump.Enabled and (state == Enum.HumanoidStateType.Running or state == Enum.HumanoidStateType.Landed) and moveDirection ~= Vector3.zero and (Attacking or AlwaysJump.Enabled) then
-							entitylib.character.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+							hum:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 					end
 				end))
@@ -3059,6 +3058,9 @@ run(function()
 	local Loop = {
 		Normal = function()
 			pcall(function()
+				-- Local player's position is identical for every nametag this frame;
+				-- resolve the property chain once instead of per-entity.
+				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
 				for ent, nametag in Reference do
 					if not nametag or not nametag.Parent then
 						Reference[ent] = nil
@@ -3066,7 +3068,7 @@ run(function()
 					end
 					
 					if DistanceCheck.Enabled then
-						local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
+						local distance = selfPos and (selfPos - ent.RootPart.Position).Magnitude or math.huge
 						if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
 							nametag.Visible = false
 							continue
@@ -3080,7 +3082,7 @@ run(function()
 					end
 
 					if Distance.Enabled then
-						local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
+						local mag = selfPos and math.floor((selfPos - ent.RootPart.Position).Magnitude) or 0
 						if Sizes[ent] ~= mag then
 							nametag.Text = string.format(Strings[ent], mag)
 							local ize = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
@@ -3094,6 +3096,9 @@ run(function()
 		end,
 		Drawing = function()
 			pcall(function()
+				-- Local player's position is identical for every nametag this frame;
+				-- resolve the property chain once instead of per-entity.
+				local selfPos = entitylib.isAlive and entitylib.character.RootPart.Position
 				for ent, nametag in Reference do
 					if not nametag or not nametag.Text or not nametag.BG then
 						Reference[ent] = nil
@@ -3101,7 +3106,7 @@ run(function()
 					end
 
 					if DistanceCheck.Enabled then
-						local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
+						local distance = selfPos and (selfPos - ent.RootPart.Position).Magnitude or math.huge
 						if distance < DistanceLimit.ValueMin or distance > DistanceLimit.ValueMax then
 							nametag.Text.Visible = false
 							nametag.BG.Visible = false
@@ -3117,7 +3122,7 @@ run(function()
 					end
 
 					if Distance.Enabled then
-						local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
+						local mag = selfPos and math.floor((selfPos - ent.RootPart.Position).Magnitude) or 0
 						if Sizes[ent] ~= mag then
 							nametag.Text.Text = string.format(Strings[ent], mag)
 							nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
@@ -6517,14 +6522,17 @@ run(function()
 		Function = function(callback)
 			if callback then 
 				repeat
-					for i, v in entitylib.List do 
+					-- same colour for every entity this tick; compute once, not per-entity
+					local fill = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
+					local trans = Color.Opacity
+					for i, v in entitylib.List do
 						local highlight = v.Character and v.Character:FindFirstChild('_DamageHighlight_')
 						if highlight then 
 							if not table.find(done, highlight) then 
 								table.insert(done, highlight) 
 							end
-							highlight.FillColor = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
-							highlight.FillTransparency = Color.Opacity
+							highlight.FillColor = fill
+							highlight.FillTransparency = trans
 						end
 					end
 					task.wait(0.1)
@@ -7493,7 +7501,6 @@ shared.bedwars = {
     assetfunction       = assetfunction,
     oldSwing            = oldSwing,
     updateVelocity      = updateVelocity,
-    Prediction          = Prediction,
     _baseGetSpeed       = _baseGetSpeed,
 }
 
