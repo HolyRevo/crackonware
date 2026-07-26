@@ -7592,6 +7592,12 @@ local function downloadBedwars()
     local cached = isfile(path) and readfile(path) or nil
     if cached and cached:gsub('%s', '') == '' then cached = nil end
 
+    -- Developer mode: never touch the network -- run the local bedwars.lua exactly as-is so a
+    -- dev can test unpushed edits without the auto-update overwriting them.
+    if shared.PistonwareDeveloper then
+        return cached
+    end
+
     local latest = fetchBedwarsCommit()
     local stored = isfile(checkPath) and readfile(checkPath):gsub('%s', '') or nil
 
