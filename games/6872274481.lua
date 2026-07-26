@@ -693,6 +693,54 @@ lplr.CharacterAdded:Connect(function(c)
     ensureCharPrimaryPart(c)
 end)
 
+-- == shared __namecall guard ==
+-- There is exactly ONE global __namecall hook in the whole product and it lives
+-- here, in the unobfuscated file. Every namecall in the game -- including the
+-- tens of thousands Roact issues while it builds and re-renders the item shop --
+-- passes through this function, so it must stay native-speed Lua. A hook
+-- installed from bedwars.lua costs a Luraph VM re-entry on each of those calls,
+-- which is what turned opening the shop (and every purchase re-render) into a
+-- visible hitch while leaving the unobfuscated build smooth.
+--
+-- Modules that need to see or block a specific remote register the exact
+-- (Instance, method) pair here via shared.bedwars.namecallGuard instead. The hot
+-- path cost is one hash lookup; handlers only ever run for instances somebody
+-- actually asked about.
+local namecallWatch = {}
+local namecallGuard = {}
+
+-- handler may be `true` to swallow the call outright, or a function -- return a
+-- truthy value from it to swallow the call, nil/false to let it through.
+-- Method names are matched exactly as getnamecallmethod() reports them.
+function namecallGuard.watch(inst, method, handler)
+    if typeof(inst) ~= 'Instance' or type(method) ~= 'string' then return false end
+    local entry = namecallWatch[inst]
+    if not entry then
+        entry = {}
+        namecallWatch[inst] = entry
+    end
+    entry[method] = handler or true
+    return true
+end
+
+function namecallGuard.block(inst, method)
+    return namecallGuard.watch(inst, method, true)
+end
+
+function namecallGuard.unwatch(inst, method)
+    local entry = inst and namecallWatch[inst]
+    if not entry then return end
+    if method then
+        entry[method] = nil
+        if next(entry) == nil then
+            namecallWatch[inst] = nil
+        end
+    else
+        namecallWatch[inst] = nil
+    end
+end
+
+local getnamecallmethod = getnamecallmethod
 local mt = getrawmetatable(game)
 setreadonly(mt, false)
 local oldNamecall = mt.__namecall
@@ -706,6 +754,16 @@ mt.__namecall = function(self, ...)
             return pp.CFrame
         else
             return CFrame.new()
+        end
+    end
+    local entry = namecallWatch[self]
+    if entry then
+        local handler = entry[method]
+        if handler == true then
+            return
+        elseif handler then
+            local ok, blocked = pcall(handler, self, ...)
+            if ok and blocked then return end
         end
     end
     return oldNamecall(self, ...)
@@ -7502,32 +7560,70 @@ shared.bedwars = {
     oldSwing            = oldSwing,
     updateVelocity      = updateVelocity,
     _baseGetSpeed       = _baseGetSpeed,
+    namecallGuard       = namecallGuard,
 }
 
--- bedwars.lua is the ONLY file fetched from Codeberg -- everything else comes from GitHub --
--- so the URL is hardcoded rather than built from a path. Codeberg's raw endpoint
--- intermittently 504s with an empty body, which hurts more here than anywhere else because
--- this file is ~280KB, hence the retries. A failed download returns nil instead of falling
--- through to readfile() on a file that was never written (that errored out and took the
--- whole script down with it).
+-- bedwars.lua is the ONLY file fetched from Codeberg -- everything else comes from GitHub.
+-- It auto-updates: the sha of the latest commit that touched games/bedwars.lua is tracked in
+-- bedwarscheck.txt; whenever Codeberg reports a newer commit, the file is silently
+-- re-downloaded (no prompt) and the sha re-recorded.
+
+-- Latest commit sha that touched games/bedwars.lua on Codeberg, or nil on failure.
+local function fetchBedwarsCommit()
+    local suc, res = pcall(function()
+        return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/commits?path=games/bedwars.lua&limit=1&sha=main', true)
+    end)
+    if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
+    local dsuc, body = pcall(function()
+        return httpService:JSONDecode(res)
+    end)
+    if not (dsuc and type(body) == 'table' and body[1] and body[1].sha) then return nil end
+    return body[1].sha
+end
+
+-- Returns the bedwars.lua source, auto-updating from Codeberg when a newer commit exists.
+-- Codeberg's raw endpoint intermittently 504s with an empty body (worse here since this file
+-- is large), hence the retries; the download is pinned to the exact commit sha so a fetch
+-- right after a push can't grab a stale CDN copy of the branch head.
 local function downloadBedwars()
     local path = 'pistonware/games/bedwars.lua'
+    local checkPath = 'pistonware/games/bedwarscheck.txt'
+
     local cached = isfile(path) and readfile(path) or nil
-    if cached and cached:gsub('%s', '') ~= '' then return cached end
+    if cached and cached:gsub('%s', '') == '' then cached = nil end
+
+    local latest = fetchBedwarsCommit()
+    local stored = isfile(checkPath) and readfile(checkPath):gsub('%s', '') or nil
+
+    -- Up to date, or the commit couldn't be fetched (don't wipe a good cache we can't verify):
+    -- use what we already have.
+    if cached and (not latest or latest == stored) then
+        return cached
+    end
+
+    -- No cache, or a newer commit exists -> (re)download and record the new sha.
     for attempt = 1, 4 do
         local suc, res = pcall(function()
-            return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+            local url = latest
+                and ('https://codeberg.org/pistonware/pistonware/raw/commit/'..latest..'/games/bedwars.lua')
+                or 'https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua'
+            return game:HttpGet(url, true)
         end)
         if suc and res and res ~= '' and res ~= '404: Not Found' then
-            res = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res
-            pcall(writefile, path, res)
+            pcall(writefile, path, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
+            if latest then
+                pcall(writefile, checkPath, latest)
+            end
             return res
         end
         if attempt < 4 then
             task.wait(attempt)
         end
     end
-    return nil
+
+    -- Every download attempt failed: fall back to the stale cache rather than nil so the
+    -- script still runs (it just stays on the previous version until the next successful run).
+    return cached
 end
 
 local bedwarsSource = downloadBedwars()
