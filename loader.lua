@@ -693,7 +693,31 @@ local function createConsole()
 	return console
 end
 
-local console = createConsole()
+-- Same surface as the console, wired to nothing. Reloads are not user-initiated -- the queued
+-- teleport script, the GUI's reinject buttons -- so they run the same boot with no window over
+-- the game, and every call site below stays identical instead of guarding each one.
+local function createHeadlessConsole()
+	local console = {}
+	function console:SetStatus() end
+	function console:SetLine() end
+	function console:SetProgress() end
+	function console:Finish() end
+	function console:Fail() end
+	function console:IsAborted() return false end
+	-- unattended, so a question can only answer with whatever the timeout would have picked
+	function console:Ask(question, buttons, timeoutSeconds, fallback)
+		return fallback
+	end
+	return console
+end
+
+-- shared.vapereload marks a run that something else started rather than a manual execution.
+-- Read once here: it is cleared after main.lua has had its look at it (see the bottom of this
+-- file), because nothing else clears it and a stale true would hide the console from every
+-- later manual execution in the session.
+local isReload = shared.vapereload and true or false
+
+local console = isReload and createHeadlessConsole() or createConsole()
 console:SetStatus('INJECTING')
 console:SetLine('Injecting into ROBLOX...')
 console:SetProgress(0.08)
@@ -790,9 +814,9 @@ if console:IsAborted() then deleteInstall() return end
 -- Step 2b: existing installs (3+ profiles). If profiles/ has changed on GitHub since the last
 -- download/sync, offer to overwrite the shipped configs with the latest ones. Only the files
 -- that exist in the GitHub profiles folder get redownloaded -- profiles the user made
--- themselves are left alone. Skipped on reinjects/teleports (shared.vapereload) so it only
--- ever asks once per session, on the first manual execution.
-if not firstRunProfiles and not declinedDownload and not shared.vapereload then
+-- themselves are left alone. Skipped on reinjects/teleports so it only ever asks once per
+-- session, on the first manual execution.
+if not firstRunProfiles and not declinedDownload and not isReload then
 	local latestCommit, cachedCommit
 	pcall(function()
 		latestCommit = fetchProfilesCommit()
@@ -877,6 +901,10 @@ local ok, result = pcall(function()
 	return loadstring(downloadFile('pistonware/main.lua'), 'main')()
 end)
 injecting = false
+-- Consumed only now: main.lua reads the flag itself while loading (it suppresses the 'Finished
+-- Loading' notification on a reload). Left set it would leak into the rest of the session,
+-- since main.lua never clears it and the next teleport/reinject sets it again anyway.
+shared.vapereload = nil
 
 -- Cancelled while the GUI was already building: tear that back down too, then wipe whatever
 -- the run wrote after cancel's first pass.
