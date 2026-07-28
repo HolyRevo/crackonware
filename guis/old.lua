@@ -3653,6 +3653,11 @@ do
 		syncing = true
 		synctitle.Text = 'Syncing...'
 
+		-- Flush the current state to disk first: the reinject below neuters Save, and gui.txt
+		-- (GUI theme colour, window positions, keybind) is only ever written by it, so anything
+		-- changed since the last autosave tick would be lost on the way out.
+		pcall(function() mainapi:Save() end)
+
 		local synced, message = downloadProfiles()
 		if not synced then
 			syncing = false
@@ -3677,6 +3682,87 @@ do
 			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 		end
 	end)
+
+	-- Which shipped config loads by default. There is nothing extra to persist: the default is
+	-- simply the active profile, which Save already records in gui.txt, so it is what a plain
+	-- reinject (and the sync above) comes back to.
+	local defaultrow = Instance.new('Frame')
+	defaultrow.Name = 'DefaultConfig'
+	defaultrow.LayoutOrder = 1000
+	defaultrow.Size = UDim2.new(1, -14, 0, 20)
+	defaultrow.BackgroundTransparency = 1
+	defaultrow.Parent = children
+
+	local configbuttons = {}
+	local function refreshConfigButtons()
+		if not mainapi.GUIColor then return end
+		for name, button in configbuttons do
+			local selected = mainapi.Profile == name
+			button.BackgroundColor3 = selected and Color3.fromHSV(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or color.Dark(uipallet.Main, 0.05)
+			button.TextColor3 = selected and mainapi:TextColor(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or uipallet.Text
+		end
+	end
+
+	local function selectConfig(name)
+		if mainapi.Profile == name then return end
+		if not isfile('pistonware/profiles/'..name..mainapi.Place..'.txt') then
+			mainapi:CreateNotification('Vape', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
+			return
+		end
+		-- A config that was never added as a profile still needs a list entry, otherwise the
+		-- next Save drops the name again. ChangeValue(name) is not usable here: it toggles, so
+		-- it would delete the profile whenever one already exists.
+		if not profilescategory:GetValue(name) then
+			table.insert(mainapi.Profiles, {Name = name, Bind = {}})
+			profilescategory:ChangeValue()
+		end
+		-- Same two calls the profile entries above use: Save moves the pointer in gui.txt and
+		-- writes the outgoing profile, Load then reads the incoming one back in.
+		mainapi:Save(name)
+		mainapi:Load(true)
+		refreshConfigButtons()
+	end
+
+	for index, config in {{Key = 'blatant', Text = 'Blatant'}, {Key = 'legit', Text = 'Legit'}} do
+		local name = config.Key
+		local button = Instance.new('TextButton')
+		button.Name = name
+		-- Half of the sync button each, sharing its 4px margins with a 4px gutter between.
+		button.Size = UDim2.new(0.5, -6, 1, 0)
+		button.Position = index == 1 and UDim2.fromOffset(4, 0) or UDim2.new(0.5, 2, 0, 0)
+		button.BackgroundColor3 = color.Dark(uipallet.Main, 0.05)
+		button.BorderSizePixel = 0
+		button.AutoButtonColor = false
+		button.Text = config.Text
+		button.TextColor3 = uipallet.Text
+		button.TextSize = 18
+		button.FontFace = uipallet.Font
+		button.Parent = defaultrow
+		addTooltip(button, 'Load the '..config.Text..' config by default')
+		configbuttons[name] = button
+
+		button.MouseEnter:Connect(function()
+			if mainapi.Profile == name then return end
+			button.BackgroundColor3 = color.Dark(uipallet.Main, 0.14)
+		end)
+		button.MouseLeave:Connect(function()
+			refreshConfigButtons()
+		end)
+		button.MouseButton1Click:Connect(function()
+			selectConfig(name)
+		end)
+	end
+
+	-- Load is the one place that settles which profile is active -- first inject, reinject, or a
+	-- click on a profile entry -- so the highlight follows it instead of being poked from each
+	-- of those callers.
+	local loadprofile = mainapi.Load
+	function mainapi:Load(...)
+		loadprofile(self, ...)
+		refreshConfigButtons()
+	end
+	-- picks up a GUI colour change made while the tab was closed
+	defaultrow.MouseEnter:Connect(refreshConfigButtons)
 end
 
 --[[
