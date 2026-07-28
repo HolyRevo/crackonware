@@ -43,6 +43,84 @@ local function downloadFile(path, func)
 	return (func or readfile)(path)
 end
 
+-- Fetches the GitHub profiles folder listing; returns the decoded {name=,path=,type=} array, or nil on failure.
+-- Pass a commit sha as `ref` to get the listing exactly as of that commit instead of branch head.
+local function fetchProfilesListing(ref)
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(ref and ('?ref='..ref) or ''), true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table') then return nil end
+	return body
+end
+
+-- Downloads every file in a profiles listing concurrently. When `commit` is given, files are
+-- fetched pinned to that exact commit sha and overwritten unconditionally -- branch-path raw
+-- URLs can serve CDN-cached content for up to ~5 minutes after a push, which would make a
+-- "sync" quietly reinstall the old profiles. `onProgress(done, total)` is optional and only
+-- feeds the console line.
+local function downloadProfilesListing(body, commit, onProgress)
+	local files = {}
+	for _, v in body do
+		if v.type == 'file' then
+			table.insert(files, v)
+		end
+	end
+	local completed, pending, total = 0, #files, #files
+	local done = Instance.new('BindableEvent')
+	for _, v in files do
+		local relPath = ({v.path:gsub(' ', '%%20')})[1]
+		task.spawn(function()
+			if commit then
+				pcall(function()
+					for attempt = 1, 4 do
+						local suc, res = pcall(function()
+							return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..commit..'/'..relPath, true)
+						end)
+						if suc and res and res ~= '' and res ~= '404: Not Found' then
+							writefile('pistonware/'..relPath, res)
+							break
+						end
+						if attempt < 4 then
+							task.wait(attempt)
+						end
+					end
+				end)
+			else
+				pcall(downloadFile, 'pistonware/'..relPath)
+			end
+			completed += 1
+			pending -= 1
+			if onProgress then
+				onProgress(completed, total)
+			end
+			if pending <= 0 then
+				done:Fire()
+			end
+		end)
+	end
+	if pending > 0 then
+		done.Event:Wait()
+	end
+	done:Destroy()
+end
+
+-- Returns the sha of the most recent commit that touched profiles/ on GitHub, or nil on failure.
+local function fetchProfilesCommit()
+	local reqSuc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
+	end)
+	if not (reqSuc and res and res ~= '404: Not Found') then return nil end
+	local bodySuc, body = pcall(function()
+		return cloneref(game:GetService('HttpService')):JSONDecode(res)
+	end)
+	if not (bodySuc and body and typeof(body) == 'table' and body[1] and body[1].sha) then return nil end
+	return body[1].sha
+end
+
 --[[
 	Loader console
 	--------------
@@ -684,48 +762,79 @@ local downloadedConfigs = false
 if firstRunProfiles and not declinedDownload and wantsDownload then
 	console:SetLine('Downloading configs...')
 	pcall(function()
-		local reqSuc, res = pcall(function()
-			return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
-		end)
-		if reqSuc and res and res ~= '404: Not Found' then
-			local bodySuc, body = pcall(function()
-				return cloneref(game:GetService('HttpService')):JSONDecode(res)
+		local body = fetchProfilesListing()
+		if body then
+			downloadProfilesListing(body, nil, function(completed, total)
+				console:SetLine('Downloading configs ('..completed..'/'..total..')...')
+				console:SetProgress(0.53 + 0.2 * (completed / math.max(total, 1)))
 			end)
-			if bodySuc and body and typeof(body) == 'table' then
-				local files = {}
-				for _, v in body do
-					if v.type == 'file' then
-						table.insert(files, v)
-					end
-				end
-				local total = #files
-				local completed, pending = 0, total
-				local done = Instance.new('BindableEvent')
-				for _, v in files do
-					task.spawn(function()
-						pcall(downloadFile, 'pistonware/'.. ({v.path:gsub(' ', '%%20')})[1])
-						completed += 1
-						pending -= 1
-						console:SetLine('Downloading configs ('..completed..'/'..total..')...')
-						console:SetProgress(0.53 + 0.2 * (completed / math.max(total, 1)))
-						if pending <= 0 then
-							done:Fire()
-						end
-					end)
-				end
-				if pending > 0 then
-					done.Event:Wait()
-				end
-				done:Destroy()
-			end
 		end
 	end)
 	pcall(function()
 		downloadedConfigs = #listfiles('pistonware/profiles') >= 3
 	end)
+	-- Record which commit this download reflects, so later sessions can tell whether profiles/
+	-- has changed on GitHub since (see the sync prompt below).
+	if downloadedConfigs then
+		pcall(function()
+			local commit = fetchProfilesCommit()
+			if commit then
+				writefile('pistonware/profiles/profilecommit.txt', commit)
+			end
+		end)
+	end
 end
 -- Deleted again here: downloads already in flight when cancel fired can land after its wipe.
 if console:IsAborted() then deleteInstall() return end
+
+-- Step 2b: existing installs (3+ profiles). If profiles/ has changed on GitHub since the last
+-- download/sync, offer to overwrite the shipped configs with the latest ones. Only the files
+-- that exist in the GitHub profiles folder get redownloaded -- profiles the user made
+-- themselves are left alone. Skipped on reinjects/teleports (shared.vapereload) so it only
+-- ever asks once per session, on the first manual execution.
+if not firstRunProfiles and not declinedDownload and not shared.vapereload then
+	local latestCommit, cachedCommit
+	pcall(function()
+		latestCommit = fetchProfilesCommit()
+		cachedCommit = isfile('pistonware/profiles/profilecommit.txt') and readfile('pistonware/profiles/profilecommit.txt'):gsub('%s', '') or nil
+	end)
+	if latestCommit and latestCommit ~= cachedCommit then
+		console:SetProgress(0.6)
+		local ok, wantsSync = pcall(function()
+			return console:Ask('Would you like to sync to the latest config?', {
+				{text = 'Yes', key = true},
+				{text = 'No', key = false}
+			}, 60, false)
+		end)
+		if console:IsAborted() then deleteInstall() return end
+		if ok and wantsSync == true then
+			console:SetLine('Syncing configs...')
+			pcall(function()
+				-- If a previous instance is still injected, uninject it BEFORE overwriting:
+				-- Uninject() saves the old in-memory config to disk as its first step, and
+				-- main.lua would otherwise trigger it right after us -- clobbering the freshly
+				-- synced profiles with the old settings. Same for its autosave loop.
+				if shared.vape then
+					pcall(function() shared.vape:Uninject() end)
+					shared.vape = nil
+				end
+				-- Listing and file contents both pinned to latestCommit so a sync run right
+				-- after a push can't grab a stale CDN copy of the branch head.
+				local body = fetchProfilesListing(latestCommit)
+				if body then
+					downloadProfilesListing(body, latestCommit, function(completed, total)
+						console:SetLine('Syncing configs ('..completed..'/'..total..')...')
+						console:SetProgress(0.6 + 0.13 * (completed / math.max(total, 1)))
+					end)
+					writefile('pistonware/profiles/profilecommit.txt', latestCommit)
+				end
+			end)
+			if console:IsAborted() then deleteInstall() return end
+		end
+		-- On "No"/timeout the stored commit stays stale, so the prompt returns next session
+		-- until the user agrees to sync once.
+	end
+end
 console:SetProgress(0.73)
 
 -- Step 3: after the shipped configs finish downloading, ask which one should load by default
