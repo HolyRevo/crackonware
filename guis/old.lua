@@ -3579,6 +3579,34 @@ local profilescategory = mainapi:CreateCategoryList({
 -- sync would download nothing at all), and nothing is filtered out. <GameId>.gui.txt carries
 -- the config's GUI theme colour and window layout, so holding it back was what made a synced
 -- config come back looking exactly like the one it replaced.
+-- pistonware/profiles is stamped with the commit it was pulled from, so a sync that would
+-- change nothing can be turned away before it spends any requests finding that out. Nothing
+-- else in the codebase reads profilecommit.txt; this is what writes it.
+local function localProfileCommit()
+	local suc, res = pcall(readfile, 'pistonware/profiles/profilecommit.txt')
+	if not (suc and type(res) == 'string') then return nil end
+	res = res:gsub('%s', '')
+	return res ~= '' and res or nil
+end
+
+local function latestProfileCommit()
+	local suc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&per_page=1', true)
+	end)
+	if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
+	local ok, body = pcall(function()
+		return httpService:JSONDecode(res)
+	end)
+	if not (ok and typeof(body) == 'table' and body[1] and type(body[1].sha) == 'string') then return nil end
+	return body[1].sha
+end
+
+-- Being on the latest commit is not enough on its own: the sync exists to put both shipped
+-- configs for this place on disk, so a missing one has to let it through regardless.
+local function hasBothConfigs()
+	return isfile('pistonware/profiles/blatant'..mainapi.Place..'.txt') and isfile('pistonware/profiles/legit'..mainapi.Place..'.txt')
+end
+
 local function downloadProfileFile(path)
 	local relPath = select(1, path:gsub('pistonware/', ''))
 	local content
@@ -3696,8 +3724,20 @@ do
 	syncbutton.MouseButton1Click:Connect(function()
 		if syncing then return end
 		syncing = true
-		synctitle.Text = 'Syncing...'
+		synctitle.Text = 'Checking...'
 
+		-- One request to compare commits, rather than a dozen to redownload files that have not
+		-- moved. GitHub allows 60 unauthenticated API calls an hour and a few reinjects can spend
+		-- that, so a folder that is already current is turned away before the listing request.
+		local latest = latestProfileCommit()
+		if latest and latest == localProfileCommit() and hasBothConfigs() then
+			syncing = false
+			synctitle.Text = 'Profiles already up to date'
+			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync.', 10)
+			return
+		end
+
+		synctitle.Text = 'Syncing...'
 		-- Flush what is in memory first so a download that only half lands cannot strand the
 		-- GUI between two states -- whatever does arrive replaces this a moment later.
 		pcall(function() mainapi:Save() end)
@@ -3708,6 +3748,11 @@ do
 			synctitle.Text = 'Sync to current profiles'
 			mainapi:CreateNotification('Vape', message, 10, 'alert')
 			return
+		end
+		-- Stamped only once the files are down, and only when the commit was readable in the first
+		-- place, so a half-finished or unverified sync still re-checks next time.
+		if latest then
+			pcall(writefile, 'pistonware/profiles/profilecommit.txt', latest)
 		end
 
 		-- Downloaded, but nothing is loaded yet: the files are settings on disk until something
