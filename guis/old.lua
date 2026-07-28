@@ -3730,13 +3730,20 @@ do
 
 	local configbuttons = {}
 	function refreshConfigButtons()
-		if not mainapi.GUIColor then return end
+		local anyvisible = false
 		for name, button in configbuttons do
+			-- A config can only be offered once its file is on disk: before the first sync there
+			-- may be none at all, so the row hides itself rather than showing a button whose only
+			-- possible answer is an error.
+			button.Visible = pending or isfile('pistonware/profiles/'..name..mainapi.Place..'.txt')
+			anyvisible = anyvisible or button.Visible
 			-- while a sync is waiting on a choice both read as live options, not one active one
 			local selected = mainapi.Profile == name and not pending
 			button.BackgroundColor3 = selected and Color3.fromHSV(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or color.Dark(uipallet.Main, 0.05)
 			button.TextColor3 = selected and mainapi:TextColor(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or uipallet.Text
 		end
+		-- an invisible row is skipped by the list layout, so the gap closes with it
+		defaultrow.Visible = anyvisible
 	end
 
 	local function selectConfig(name)
@@ -3744,62 +3751,44 @@ do
 			mainapi:CreateNotification('Vape', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
 			return
 		end
-		-- A config that was never added as a profile still needs a list entry, otherwise the
-		-- next Save drops the name again. ChangeValue(name) is not usable here: it toggles, so
-		-- it would delete the profile whenever one already exists.
-		if not profilescategory:GetValue(name) then
-			table.insert(mainapi.Profiles, {Name = name, Bind = {}})
-			profilescategory:ChangeValue()
-		end
-
-		if pending then
-			-- Finishing the sync: everything in memory is from before the download, and the
-			-- autosave would write it straight back over the new files, so Save is neutered and
-			-- vape reloads onto them with this config selected. The result message rides across
-			-- the reload in shared.PistonwareSyncResult, which main.lua turns into a
-			-- notification once loading finishes.
-			pending = false
-			synctitle.Text = 'Reloading...'
-			mainapi.Save = function() end
-			-- Save is off now and the reload reads the profile list back out of gui.txt, so the
-			-- chosen config has to be written in there directly. Going through Save instead would
-			-- rewrite the profile file the download just refreshed.
-			pcall(function()
-				local guipath = 'pistonware/profiles/'..game.GameId..'.gui.txt'
-				local guidata = isfile(guipath) and loadJson(guipath)
-				if type(guidata) ~= 'table' then return end
-				guidata.Profiles = guidata.Profiles or {}
-				local listed = false
-				for _, v in guidata.Profiles do
-					if v.Name == name then
-						listed = true
-						break
-					end
+		-- Always a full reload, never an in-place profile switch. The GUI theme colour, window
+		-- layout and keybind live in <GameId>.gui.txt, and Load(true) -- what the profile entries
+		-- use -- deliberately skips that file, so switching in place brings the config's modules
+		-- across but leaves the GUI dressed as whatever it replaced. Save is neutered first so the
+		-- autosave cannot write the old state back over a fresh download.
+		pending = false
+		synctitle.Text = 'Reloading...'
+		mainapi.Save = function() end
+		-- Save is off now and the reload reads the profile list back out of gui.txt, so the chosen
+		-- config has to be written in there directly. Going through Save instead would rewrite the
+		-- profile file a download just refreshed.
+		pcall(function()
+			local guipath = 'pistonware/profiles/'..game.GameId..'.gui.txt'
+			local guidata = isfile(guipath) and loadJson(guipath)
+			if type(guidata) ~= 'table' then return end
+			guidata.Profiles = guidata.Profiles or {}
+			local listed = false
+			for _, v in guidata.Profiles do
+				if v.Name == name then
+					listed = true
+					break
 				end
-				if not listed then
-					table.insert(guidata.Profiles, {Name = name, Bind = {}})
-				end
-				guidata.Profile = name
-				writefile(guipath, httpService:JSONEncode(guidata))
-			end)
-			shared.PistonwareSyncResult = syncmessage
-			shared.VapeCustomProfile = name
-			shared.vapereload = true
-			if shared.PistonwareDeveloper then
-				loadstring(readfile('pistonware/loader.lua'), 'loader')()
-			else
-				loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 			end
-			return
+			if not listed then
+				table.insert(guidata.Profiles, {Name = name, Bind = {}})
+			end
+			guidata.Profile = name
+			writefile(guipath, httpService:JSONEncode(guidata))
+		end)
+		-- nil unless a sync is being finished off, which is the only time main.lua should report one
+		shared.PistonwareSyncResult = syncmessage
+		shared.VapeCustomProfile = name
+		shared.vapereload = true
+		if shared.PistonwareDeveloper then
+			loadstring(readfile('pistonware/loader.lua'), 'loader')()
+		else
+			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 		end
-
-		-- No sync waiting, so this is just a profile switch: the same two calls the profile
-		-- entries above use. Save moves the pointer in gui.txt and writes the outgoing profile,
-		-- Load then reads the incoming one back in.
-		if mainapi.Profile == name then return end
-		mainapi:Save(name)
-		mainapi:Load(true)
-		refreshConfigButtons()
 	end
 
 	for index, config in {{Key = 'blatant', Text = 'Blatant'}, {Key = 'legit', Text = 'Legit'}} do
@@ -3842,6 +3831,7 @@ do
 	end
 	-- picks up a GUI colour change made while the tab was closed
 	defaultrow.MouseEnter:Connect(refreshConfigButtons)
+	refreshConfigButtons()
 end
 
 --[[
