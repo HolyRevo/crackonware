@@ -2762,7 +2762,7 @@ do
 
 	syncbutton.MouseEnter:Connect(function()
 		tween:Tween(syncbutton, uipallet.Tween, {
-			BackgroundColor3 = color.Dark(uipallet.Main, 0.12)
+			BackgroundColor3 = color.Light(uipallet.Main, 0.06)
 		})
 	end)
 	syncbutton.MouseLeave:Connect(function()
@@ -2774,6 +2774,11 @@ do
 		if syncing then return end
 		syncing = true
 		synctitle.Text = 'Syncing...'
+
+		-- Flush the current state to disk first: the reinject below neuters Save, and gui.txt
+		-- (GUI theme colour, window positions, keybind) is only ever written by it, so anything
+		-- changed since the last autosave tick would be lost on the way out.
+		pcall(function() mainapi:Save() end)
 
 		local synced, message = downloadProfiles()
 		if not synced then
@@ -2799,6 +2804,107 @@ do
 			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
 		end
 	end)
+
+	-- Which shipped config loads by default. There is nothing extra to persist: the default is
+	-- simply the active profile, which Save already records in gui.txt, so it is what a plain
+	-- reinject (and the sync above) comes back to. The grid gives every cell the same size, so
+	-- this is a second card with the pair of buttons split across it.
+	local defaultcard = Instance.new('Frame')
+	defaultcard.Name = 'DefaultConfig'
+	defaultcard.LayoutOrder = 1000
+	defaultcard.BackgroundColor3 = color.Dark(uipallet.Main, 0.03)
+	defaultcard.Parent = profilescategory.Container
+	addCorner(defaultcard, UDim.new(0, 16))
+	local defaulttitle = Instance.new('TextLabel')
+	defaulttitle.Name = 'Title'
+	defaulttitle.Size = UDim2.new(1, -24, 0, 28)
+	defaulttitle.Position = UDim2.fromOffset(12, 10)
+	defaulttitle.BackgroundTransparency = 1
+	defaulttitle.Text = 'Default config'
+	defaulttitle.TextColor3 = color.Dark(uipallet.Text, 0.21)
+	defaulttitle.TextSize = 17
+	defaulttitle.FontFace = uipallet.Font
+	defaulttitle.Parent = defaultcard
+
+	local configbuttons = {}
+	local function refreshConfigButtons()
+		if not mainapi.GUIColor then return end
+		for name, button in configbuttons do
+			local selected = mainapi.Profile == name
+			button.BackgroundColor3 = selected and Color3.fromHSV(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or color.Light(uipallet.Main, 0.06)
+			button.TextColor3 = selected and mainapi:TextColor(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or uipallet.Text
+		end
+	end
+
+	local function selectConfig(name)
+		if mainapi.Profile == name then return end
+		if not isfile('pistonware/profiles/'..name..mainapi.Place..'.txt') then
+			mainapi:CreateNotification('Vape', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
+			return
+		end
+		-- A config that was never added as a profile still needs a list entry, otherwise the
+		-- next Save drops the name again.
+		local listed = false
+		for _, v in mainapi.Profiles do
+			if v.Name == name then
+				listed = true
+				break
+			end
+		end
+		if not listed then
+			table.insert(mainapi.Profiles, {Name = name, Bind = {}})
+		end
+		-- Same two calls the profile entries use: Save moves the pointer in gui.txt and writes
+		-- the outgoing profile, Load then reads the incoming one back in.
+		mainapi:Save(name)
+		mainapi:Load(true)
+		refreshConfigButtons()
+	end
+
+	for index, config in {{Key = 'blatant', Text = 'Blatant'}, {Key = 'legit', Text = 'Legit'}} do
+		local name = config.Key
+		local button = Instance.new('TextButton')
+		button.Name = name
+		-- Half the card each, inside its 12px margins with a 8px gutter between.
+		button.Size = UDim2.new(0.5, -16, 0, 40)
+		button.Position = index == 1 and UDim2.fromOffset(12, 48) or UDim2.new(0.5, 4, 0, 48)
+		button.BackgroundColor3 = color.Light(uipallet.Main, 0.06)
+		button.AutoButtonColor = false
+		button.Text = config.Text
+		button.TextColor3 = uipallet.Text
+		button.TextSize = 17
+		button.FontFace = uipallet.Font
+		button.Parent = defaultcard
+		addCorner(button, UDim.new(0, 10))
+		configbuttons[name] = button
+
+		button.MouseEnter:Connect(function()
+			if mainapi.Profile == name then return end
+			tween:Tween(button, uipallet.Tween, {
+				BackgroundColor3 = color.Light(uipallet.Main, 0.12)
+			})
+		end)
+		button.MouseLeave:Connect(function()
+			if mainapi.Profile == name then return end
+			tween:Tween(button, uipallet.Tween, {
+				BackgroundColor3 = color.Light(uipallet.Main, 0.06)
+			})
+		end)
+		button.MouseButton1Click:Connect(function()
+			selectConfig(name)
+		end)
+	end
+
+	-- Load is the one place that settles which profile is active -- first inject, reinject, or a
+	-- click on a profile entry -- so the highlight follows it instead of being poked from each
+	-- of those callers.
+	local loadprofile = mainapi.Load
+	function mainapi:Load(...)
+		loadprofile(self, ...)
+		refreshConfigButtons()
+	end
+	-- picks up a GUI colour change made while the tab was closed
+	defaultcard.MouseEnter:Connect(refreshConfigButtons)
 end
 
 mainapi:CreateCategoryTheme({
