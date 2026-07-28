@@ -6020,7 +6020,7 @@ do
 	syncbutton.FontFace = uipallet.Font
 	syncbutton.Parent = children
 	addCorner(syncbutton)
-	addTooltip(syncbutton, 'Redownloads the profiles from GitHub, then pick a config below to load one. Right click to redownload even when already up to date')
+	addTooltip(syncbutton, 'Redownloads the profiles from GitHub, then pick a config below to load one')
 
 	syncbutton.MouseEnter:Connect(function()
 		if syncing then return end
@@ -6036,7 +6036,7 @@ do
 			BackgroundColor3 = color.Light(uipallet.Main, 0.02)
 		})
 	end)
-	local function runSync(force)
+	syncbutton.MouseButton1Click:Connect(function()
 		if syncing then return end
 		syncing = true
 		syncbutton.Text = 'Checking...'
@@ -6045,10 +6045,10 @@ do
 		-- moved. GitHub allows 60 unauthenticated API calls an hour and a few reinjects can spend
 		-- that, so a folder that is already current is turned away before the listing request.
 		local latest = latestProfileCommit()
-		if not force and latest and latest == localProfileCommit() and hasBothConfigs() then
+		if latest and latest == localProfileCommit() and hasBothConfigs() then
 			syncing = false
 			syncbutton.Text = 'Profiles already up to date'
-			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync. Right click to sync anyway.', 10)
+			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync.', 10)
 			return
 		end
 
@@ -6082,16 +6082,6 @@ do
 		syncbutton.Text = 'Synced, choose a config'
 		refreshConfigButtons()
 		mainapi:CreateNotification('Vape', message..' Choose Blatant or Legit below to load one.', 10)
-	end
-
-	syncbutton.MouseButton1Click:Connect(function()
-		runSync(false)
-	end)
-	-- Right click redownloads past the commit check, for when the local copies have drifted from
-	-- the repo without the commit moving -- a hand edit, or an autosave that landed on top of a
-	-- staged download before this stopped happening.
-	syncbutton.MouseButton2Click:Connect(function()
-		runSync(true)
 	end)
 
 	-- Which shipped config loads by default. There is nothing extra to persist: the default is
