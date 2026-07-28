@@ -6020,7 +6020,7 @@ do
 	syncbutton.FontFace = uipallet.Font
 	syncbutton.Parent = children
 	addCorner(syncbutton)
-	addTooltip(syncbutton, 'Redownloads the profiles from GitHub, then pick a config below to load one')
+	addTooltip(syncbutton, 'Redownloads the profiles from GitHub, then pick a config below to load one. Right click to redownload even when already up to date')
 
 	syncbutton.MouseEnter:Connect(function()
 		if syncing then return end
@@ -6036,7 +6036,7 @@ do
 			BackgroundColor3 = color.Light(uipallet.Main, 0.02)
 		})
 	end)
-	syncbutton.MouseButton1Click:Connect(function()
+	local function runSync(force)
 		if syncing then return end
 		syncing = true
 		syncbutton.Text = 'Checking...'
@@ -6045,10 +6045,10 @@ do
 		-- moved. GitHub allows 60 unauthenticated API calls an hour and a few reinjects can spend
 		-- that, so a folder that is already current is turned away before the listing request.
 		local latest = latestProfileCommit()
-		if latest and latest == localProfileCommit() and hasBothConfigs() then
+		if not force and latest and latest == localProfileCommit() and hasBothConfigs() then
 			syncing = false
 			syncbutton.Text = 'Profiles already up to date'
-			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync.', 10)
+			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync. Right click to sync anyway.', 10)
 			return
 		end
 
@@ -6070,12 +6070,28 @@ do
 			pcall(writefile, 'pistonware/profiles/profilecommit.txt', latest)
 		end
 
+		-- Saving stops here rather than at the reload. main.lua autosaves every few seconds, and
+		-- now that the reload waits on a click, that tick would write the pre-sync state back over
+		-- the files that were just downloaded -- which is exactly how a synced config came back
+		-- wearing the old GUI colour.
+		mainapi.Save = function() end
+
 		-- Downloaded, but nothing is loaded yet: the files are settings on disk until something
 		-- reads them. Picking a config below is what reloads onto them.
 		pending, syncmessage = true, message
 		syncbutton.Text = 'Synced, choose a config'
 		refreshConfigButtons()
 		mainapi:CreateNotification('Vape', message..' Choose Blatant or Legit below to load one.', 10)
+	end
+
+	syncbutton.MouseButton1Click:Connect(function()
+		runSync(false)
+	end)
+	-- Right click redownloads past the commit check, for when the local copies have drifted from
+	-- the repo without the commit moving -- a hand edit, or an autosave that landed on top of a
+	-- staged download before this stopped happening.
+	syncbutton.MouseButton2Click:Connect(function()
+		runSync(true)
 	end)
 
 	-- Which shipped config loads by default. There is nothing extra to persist: the default is
@@ -6114,10 +6130,13 @@ do
 		-- Always a full reload, never an in-place profile switch. The GUI theme colour, window
 		-- layout and keybind live in <GameId>.gui.txt, and Load(true) -- what the profile entries
 		-- use -- deliberately skips that file, so switching in place brings the config's modules
-		-- across but leaves the GUI dressed as whatever it replaced. Save is neutered first so the
-		-- autosave cannot write the old state back over a fresh download.
+		-- across but leaves the GUI dressed as whatever it replaced.
 		pending = false
 		syncbutton.Text = 'Reloading...'
+		-- On a plain switch this flushes anything newer than the last autosave into the profile
+		-- being left behind. After a sync it is deliberately a no-op: Save was already neutered
+		-- when the download landed, which is what keeps those files intact until they are read.
+		pcall(function() mainapi:Save() end)
 		mainapi.Save = function() end
 		-- Save is off now and the reload reads the profile list back out of gui.txt, so the chosen
 		-- config has to be written in there directly. Going through Save instead would rewrite the
