@@ -2699,42 +2699,83 @@ local profilescategory = mainapi:CreateCategoryProfile({
 	Placeholder = 'Type name'
 })
 
--- Re-downloads the shipped profiles from the repo over the local copies. Everything else in
--- pistonware/profiles is left alone: gui.txt picks the GUI theme and <GameId>.gui.txt holds
--- your window layout and keybinds, neither of which is a profile.
+-- Redownloads pistonware/profiles the way loader.lua does on a first install: every file the
+-- repo keeps in that folder, pulled from the raw host through the same 4-attempt retry (raw
+-- hosts 504 intermittently, and an empty body would otherwise land as a corrupt file).
+-- Two things differ from loader.lua's downloadFile, both required for a sync rather than an
+-- install: it writes over files that already exist (downloadFile skips those, which for a
+-- sync would download nothing at all), and nothing is filtered out. <GameId>.gui.txt carries
+-- the config's GUI theme colour and window layout, so holding it back was what made a synced
+-- config come back looking exactly like the one it replaced.
+local function downloadProfileFile(path)
+	local relPath = select(1, path:gsub('pistonware/', ''))
+	local content
+	for attempt = 1, 4 do
+		local suc, res = pcall(function()
+			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
+		end)
+		if suc and res and res ~= '' and res ~= '404: Not Found' then
+			content = res
+			break
+		end
+		if attempt < 4 then
+			task.wait(attempt)
+		end
+	end
+	if not content then return false end
+	return (pcall(writefile, path, content))
+end
+
 local function downloadProfiles()
-	local suc, res = pcall(function()
+	local reqSuc, res = pcall(function()
 		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
 	end)
-	if not (suc and res and res ~= '' and res ~= '404: Not Found') then
+	if not (reqSuc and res and res ~= '' and res ~= '404: Not Found') then
 		return nil, 'Profile sync failed (could not reach GitHub).'
 	end
 
-	local decoded, body = pcall(function()
+	local bodySuc, body = pcall(function()
 		return httpService:JSONDecode(res)
 	end)
-	if not (decoded and typeof(body) == 'table') then
+	if not (bodySuc and typeof(body) == 'table') then
 		return nil, 'Profile sync failed (unreadable response).'
 	end
 
-	local synced, failed = 0, 0
+	local files = {}
 	for _, v in body do
-		if v.type == 'file' and v.name ~= 'gui.txt' and v.name ~= 'profilecheck.txt' and not v.name:find('%.gui%.txt$') then
-			local filesuc, content = pcall(function()
-				return game:HttpGet(v.download_url, true)
-			end)
-			if filesuc and content and content ~= '' and content ~= '404: Not Found' and pcall(writefile, 'pistonware/profiles/'..v.name, content) then
+		if v.type == 'file' then
+			table.insert(files, v)
+		end
+	end
+	if #files <= 0 then
+		return nil, 'Profile sync failed (the repo has no profiles).'
+	end
+
+	-- Downloaded in parallel like the loader does, rather than one blocking request per file.
+	local synced, failed, waiting = 0, 0, #files
+	local done = Instance.new('BindableEvent')
+	for _, v in files do
+		task.spawn(function()
+			if downloadProfileFile('pistonware/'.. ({v.path:gsub(' ', '%%20')})[1]) then
 				synced += 1
 			else
 				failed += 1
 			end
-		end
+			waiting -= 1
+			if waiting <= 0 then
+				done:Fire()
+			end
+		end)
 	end
+	if waiting > 0 then
+		done.Event:Wait()
+	end
+	done:Destroy()
 
 	if synced <= 0 then
 		return nil, 'Profile sync failed (nothing downloaded).'
 	end
-	return synced, 'Synced '..synced..' profile'..(synced == 1 and '' or 's')..' from GitHub'..(failed > 0 and ' ('..failed..' failed).' or '.')
+	return synced, 'Synced '..synced..' file'..(synced == 1 and '' or 's')..' from GitHub'..(failed > 0 and ' ('..failed..' failed).' or '.')
 end
 
 do
@@ -2779,9 +2820,8 @@ do
 		syncing = true
 		synctitle.Text = 'Syncing...'
 
-		-- Flush the current state to disk first: the reinject that finishes this off neuters
-		-- Save, and gui.txt (GUI theme colour, window positions, keybind) is only ever written
-		-- by it, so anything changed since the last autosave tick would be lost on the way out.
+		-- Flush what is in memory first so a download that only half lands cannot strand the
+		-- GUI between two states -- whatever does arrive replaces this a moment later.
 		pcall(function() mainapi:Save() end)
 
 		local synced, message = downloadProfiles()
