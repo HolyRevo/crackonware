@@ -2096,6 +2096,9 @@ function mainapi:CreateCategoryProfile(categorysettings)
 		end
 		windowlist.Parent.CanvasSize = UDim2.fromOffset(0, windowlist.AbsoluteContentSize.Y + 10)
 	end)
+	-- Sort gets destroyed below, taking the only handle on the scrolling frame with it, so keep
+	-- the container itself around for anything that wants to add a cell to the grid.
+	categoryapi.Container = windowlist.Parent
 	categoryapi.Sort:Destroy()
 
 	return categoryapi
@@ -2686,7 +2689,7 @@ mainapi.Categories.Inventory = mainapi.Categories.Utility
 --[[
 	Profiles
 ]]
-mainapi:CreateCategoryProfile({
+local profilescategory = mainapi:CreateCategoryProfile({
 	Name = 'CaS',
 	RealName = 'Profiles',
 	RiseIcon = 'm',
@@ -2695,6 +2698,108 @@ mainapi:CreateCategoryProfile({
 	Position = UDim2.fromOffset(12, 16),
 	Placeholder = 'Type name'
 })
+
+-- Re-downloads the shipped profiles from the repo over the local copies. Everything else in
+-- pistonware/profiles is left alone: gui.txt picks the GUI theme and <GameId>.gui.txt holds
+-- your window layout and keybinds, neither of which is a profile.
+local function downloadProfiles()
+	local suc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+	end)
+	if not (suc and res and res ~= '' and res ~= '404: Not Found') then
+		return nil, 'Profile sync failed (could not reach GitHub).'
+	end
+
+	local decoded, body = pcall(function()
+		return httpService:JSONDecode(res)
+	end)
+	if not (decoded and typeof(body) == 'table') then
+		return nil, 'Profile sync failed (unreadable response).'
+	end
+
+	local synced, failed = 0, 0
+	for _, v in body do
+		if v.type == 'file' and v.name ~= 'gui.txt' and v.name ~= 'profilecheck.txt' and not v.name:find('%.gui%.txt$') then
+			local filesuc, content = pcall(function()
+				return game:HttpGet(v.download_url, true)
+			end)
+			if filesuc and content and content ~= '' and content ~= '404: Not Found' and pcall(writefile, 'pistonware/profiles/'..v.name, content) then
+				synced += 1
+			else
+				failed += 1
+			end
+		end
+	end
+
+	if synced <= 0 then
+		return nil, 'Profile sync failed (nothing downloaded).'
+	end
+	return synced, 'Synced '..synced..' profile'..(synced == 1 and '' or 's')..' from GitHub'..(failed > 0 and ' ('..failed..' failed).' or '.')
+end
+
+do
+	local syncing = false
+	-- Sits in the profile grid as a card, matching the theme cards next door.
+	local syncbutton = Instance.new('TextButton')
+	syncbutton.Name = 'SyncProfiles'
+	syncbutton.LayoutOrder = 999
+	syncbutton.BackgroundColor3 = color.Dark(uipallet.Main, 0.03)
+	syncbutton.AutoButtonColor = false
+	syncbutton.Text = ''
+	syncbutton.Parent = profilescategory.Container
+	addCorner(syncbutton, UDim.new(0, 16))
+	local synctitle = Instance.new('TextLabel')
+	synctitle.Name = 'Title'
+	synctitle.Size = UDim2.new(1, -24, 1, 0)
+	synctitle.Position = UDim2.fromOffset(12, 0)
+	synctitle.BackgroundTransparency = 1
+	synctitle.Text = 'Sync to current profiles'
+	synctitle.TextColor3 = uipallet.Text
+	synctitle.TextSize = 18
+	synctitle.TextWrapped = true
+	synctitle.FontFace = uipallet.Font
+	synctitle.Parent = syncbutton
+
+	syncbutton.MouseEnter:Connect(function()
+		tween:Tween(syncbutton, uipallet.Tween, {
+			BackgroundColor3 = color.Dark(uipallet.Main, 0.12)
+		})
+	end)
+	syncbutton.MouseLeave:Connect(function()
+		tween:Tween(syncbutton, uipallet.Tween, {
+			BackgroundColor3 = color.Dark(uipallet.Main, 0.03)
+		})
+	end)
+	syncbutton.MouseButton1Click:Connect(function()
+		if syncing then return end
+		syncing = true
+		synctitle.Text = 'Syncing...'
+
+		local synced, message = downloadProfiles()
+		if not synced then
+			syncing = false
+			synctitle.Text = 'Sync to current profiles'
+			mainapi:CreateNotification('Vape', message, 10, 'alert')
+			return
+		end
+
+		-- The downloaded files are only settings on disk until something loads them, and the
+		-- autosave loop would write the in-memory profile straight back over them within
+		-- seconds, so Save is neutered and vape reinjects onto the fresh files. The result
+		-- message rides across the reload in shared.PistonwareSyncResult, which main.lua
+		-- turns into a notification once loading finishes.
+		synctitle.Text = 'Reloading...'
+		mainapi.Save = function() end
+		shared.PistonwareSyncResult = message
+		shared.VapeCustomProfile = mainapi.Profile
+		shared.vapereload = true
+		if shared.PistonwareDeveloper then
+			loadstring(readfile('pistonware/loader.lua'), 'loader')()
+		else
+			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
+		end
+	end)
+end
 
 mainapi:CreateCategoryTheme({
 	Name = 'Themes',
