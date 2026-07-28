@@ -3611,6 +3611,10 @@ end
 
 do
 	local syncing = false
+	-- Set once a download lands. From then until a config is picked the buttons below own the
+	-- reinject, so syncing and choosing stay one flow rather than two reloads.
+	local pending, syncmessage = false, nil
+	local refreshConfigButtons
 	local children = profilescategory.Object:FindFirstChild('Children')
 	local syncbutton = Instance.new('TextButton')
 	syncbutton.Name = 'SyncProfiles'
@@ -3622,7 +3626,7 @@ do
 	syncbutton.AutoButtonColor = false
 	syncbutton.Text = ''
 	syncbutton.Parent = children
-	addTooltip(syncbutton, 'Redownloads the profiles from GitHub and reinjects')
+	addTooltip(syncbutton, 'Redownloads the profiles from GitHub, then pick a config below to load one')
 	local syncbkg = Instance.new('Frame')
 	syncbkg.Name = 'BKG'
 	syncbkg.Size = UDim2.new(1, -8, 1, 0)
@@ -3653,34 +3657,25 @@ do
 		syncing = true
 		synctitle.Text = 'Syncing...'
 
-		-- Flush the current state to disk first: the reinject below neuters Save, and gui.txt
-		-- (GUI theme colour, window positions, keybind) is only ever written by it, so anything
-		-- changed since the last autosave tick would be lost on the way out.
+		-- Flush the current state to disk first: the reinject that finishes this off neuters
+		-- Save, and gui.txt (GUI theme colour, window positions, keybind) is only ever written
+		-- by it, so anything changed since the last autosave tick would be lost on the way out.
 		pcall(function() mainapi:Save() end)
 
 		local synced, message = downloadProfiles()
+		syncing = false
 		if not synced then
-			syncing = false
 			synctitle.Text = 'Sync to current profiles'
 			mainapi:CreateNotification('Vape', message, 10, 'alert')
 			return
 		end
 
-		-- The downloaded files are only settings on disk until something loads them, and the
-		-- autosave loop would write the in-memory profile straight back over them within
-		-- seconds, so Save is neutered and vape reinjects onto the fresh files. The result
-		-- message rides across the reload in shared.PistonwareSyncResult, which main.lua
-		-- turns into a notification once loading finishes.
-		synctitle.Text = 'Reloading...'
-		mainapi.Save = function() end
-		shared.PistonwareSyncResult = message
-		shared.VapeCustomProfile = mainapi.Profile
-		shared.vapereload = true
-		if shared.PistonwareDeveloper then
-			loadstring(readfile('pistonware/loader.lua'), 'loader')()
-		else
-			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
-		end
+		-- Downloaded, but nothing is loaded yet: the files are settings on disk until something
+		-- reads them. Picking a config below is what reloads onto them.
+		pending, syncmessage = true, message
+		synctitle.Text = 'Synced, choose a config'
+		refreshConfigButtons()
+		mainapi:CreateNotification('Vape', message..' Choose Blatant or Legit below to load one.', 10)
 	end)
 
 	-- Which shipped config loads by default. There is nothing extra to persist: the default is
@@ -3694,17 +3689,17 @@ do
 	defaultrow.Parent = children
 
 	local configbuttons = {}
-	local function refreshConfigButtons()
+	function refreshConfigButtons()
 		if not mainapi.GUIColor then return end
 		for name, button in configbuttons do
-			local selected = mainapi.Profile == name
+			-- while a sync is waiting on a choice both read as live options, not one active one
+			local selected = mainapi.Profile == name and not pending
 			button.BackgroundColor3 = selected and Color3.fromHSV(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or color.Dark(uipallet.Main, 0.05)
 			button.TextColor3 = selected and mainapi:TextColor(mainapi.GUIColor.Hue, mainapi.GUIColor.Sat, mainapi.GUIColor.Value) or uipallet.Text
 		end
 	end
 
 	local function selectConfig(name)
-		if mainapi.Profile == name then return end
 		if not isfile('pistonware/profiles/'..name..mainapi.Place..'.txt') then
 			mainapi:CreateNotification('Vape', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
 			return
@@ -3716,8 +3711,52 @@ do
 			table.insert(mainapi.Profiles, {Name = name, Bind = {}})
 			profilescategory:ChangeValue()
 		end
-		-- Same two calls the profile entries above use: Save moves the pointer in gui.txt and
-		-- writes the outgoing profile, Load then reads the incoming one back in.
+
+		if pending then
+			-- Finishing the sync: everything in memory is from before the download, and the
+			-- autosave would write it straight back over the new files, so Save is neutered and
+			-- vape reloads onto them with this config selected. The result message rides across
+			-- the reload in shared.PistonwareSyncResult, which main.lua turns into a
+			-- notification once loading finishes.
+			pending = false
+			synctitle.Text = 'Reloading...'
+			mainapi.Save = function() end
+			-- Save is off now and the reload reads the profile list back out of gui.txt, so the
+			-- chosen config has to be written in there directly. Going through Save instead would
+			-- rewrite the profile file the download just refreshed.
+			pcall(function()
+				local guipath = 'pistonware/profiles/'..game.GameId..'.gui.txt'
+				local guidata = isfile(guipath) and loadJson(guipath)
+				if type(guidata) ~= 'table' then return end
+				guidata.Profiles = guidata.Profiles or {}
+				local listed = false
+				for _, v in guidata.Profiles do
+					if v.Name == name then
+						listed = true
+						break
+					end
+				end
+				if not listed then
+					table.insert(guidata.Profiles, {Name = name, Bind = {}})
+				end
+				guidata.Profile = name
+				writefile(guipath, httpService:JSONEncode(guidata))
+			end)
+			shared.PistonwareSyncResult = syncmessage
+			shared.VapeCustomProfile = name
+			shared.vapereload = true
+			if shared.PistonwareDeveloper then
+				loadstring(readfile('pistonware/loader.lua'), 'loader')()
+			else
+				loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
+			end
+			return
+		end
+
+		-- No sync waiting, so this is just a profile switch: the same two calls the profile
+		-- entries above use. Save moves the pointer in gui.txt and writes the outgoing profile,
+		-- Load then reads the incoming one back in.
+		if mainapi.Profile == name then return end
 		mainapi:Save(name)
 		mainapi:Load(true)
 		refreshConfigButtons()
@@ -3742,7 +3781,7 @@ do
 		configbuttons[name] = button
 
 		button.MouseEnter:Connect(function()
-			if mainapi.Profile == name then return end
+			if mainapi.Profile == name and not pending then return end
 			button.BackgroundColor3 = color.Dark(uipallet.Main, 0.14)
 		end)
 		button.MouseLeave:Connect(function()
