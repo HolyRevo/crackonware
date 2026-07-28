@@ -3755,6 +3755,12 @@ do
 			pcall(writefile, 'pistonware/profiles/profilecommit.txt', latest)
 		end
 
+		-- Saving stops here rather than at the reload. main.lua autosaves every few seconds, and
+		-- now that the reload waits on a click, that tick would write the pre-sync state back over
+		-- the files that were just downloaded -- which is exactly how a synced config came back
+		-- wearing the old GUI colour.
+		mainapi.Save = function() end
+
 		-- Downloaded, but nothing is loaded yet: the files are settings on disk until something
 		-- reads them. Picking a config below is what reloads onto them.
 		pending, syncmessage = true, message
@@ -3799,10 +3805,13 @@ do
 		-- Always a full reload, never an in-place profile switch. The GUI theme colour, window
 		-- layout and keybind live in <GameId>.gui.txt, and Load(true) -- what the profile entries
 		-- use -- deliberately skips that file, so switching in place brings the config's modules
-		-- across but leaves the GUI dressed as whatever it replaced. Save is neutered first so the
-		-- autosave cannot write the old state back over a fresh download.
+		-- across but leaves the GUI dressed as whatever it replaced.
 		pending = false
 		synctitle.Text = 'Reloading...'
+		-- On a plain switch this flushes anything newer than the last autosave into the profile
+		-- being left behind. After a sync it is deliberately a no-op: Save was already neutered
+		-- when the download landed, which is what keeps those files intact until they are read.
+		pcall(function() mainapi:Save() end)
 		mainapi.Save = function() end
 		-- Save is off now and the reload reads the profile list back out of gui.txt, so the chosen
 		-- config has to be written in there directly. Going through Save instead would rewrite the
