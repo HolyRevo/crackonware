@@ -5884,7 +5884,7 @@ mainapi:Clean(friends.ColorUpdate)
 --[[
 	Profiles
 ]]
-mainapi:CreateCategoryList({
+local profilescategory = mainapi:CreateCategoryList({
 	Name = 'Profiles',
 	Icon = getcustomasset('pistonware/assets/new/profilesicon.png'),
 	Size = UDim2.fromOffset(17, 10),
@@ -5892,6 +5892,108 @@ mainapi:CreateCategoryList({
 	Placeholder = 'Type name',
 	Profiles = true
 })
+
+-- Re-downloads the shipped profiles from the repo over the local copies. Everything else in
+-- pistonware/profiles is left alone: gui.txt picks the GUI theme and <GameId>.gui.txt holds
+-- your window layout and keybinds, neither of which is a profile.
+local function downloadProfiles()
+	local suc, res = pcall(function()
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+	end)
+	if not (suc and res and res ~= '' and res ~= '404: Not Found') then
+		return nil, 'Profile sync failed (could not reach GitHub).'
+	end
+
+	local decoded, body = pcall(function()
+		return httpService:JSONDecode(res)
+	end)
+	if not (decoded and typeof(body) == 'table') then
+		return nil, 'Profile sync failed (unreadable response).'
+	end
+
+	local synced, failed = 0, 0
+	for _, v in body do
+		if v.type == 'file' and v.name ~= 'gui.txt' and v.name ~= 'profilecheck.txt' and not v.name:find('%.gui%.txt$') then
+			local filesuc, content = pcall(function()
+				return game:HttpGet(v.download_url, true)
+			end)
+			if filesuc and content and content ~= '' and content ~= '404: Not Found' and pcall(writefile, 'pistonware/profiles/'..v.name, content) then
+				synced += 1
+			else
+				failed += 1
+			end
+		end
+	end
+
+	if synced <= 0 then
+		return nil, 'Profile sync failed (nothing downloaded).'
+	end
+	return synced, 'Synced '..synced..' profile'..(synced == 1 and '' or 's')..' from GitHub'..(failed > 0 and ' ('..failed..' failed).' or '.')
+end
+
+do
+	local syncing = false
+	local children = profilescategory.Object:FindFirstChild('Children')
+	local syncbutton = Instance.new('TextButton')
+	syncbutton.Name = 'SyncProfiles'
+	-- ChangeValue rebuilds the profile entries from scratch on every add/remove, so this sits
+	-- outside that list with a LayoutOrder that keeps it pinned underneath them.
+	syncbutton.LayoutOrder = 999
+	syncbutton.Size = UDim2.fromOffset(200, 33)
+	syncbutton.BackgroundColor3 = color.Light(uipallet.Main, 0.02)
+	syncbutton.AutoButtonColor = false
+	syncbutton.Text = 'Sync to current profiles'
+	syncbutton.TextColor3 = color.Dark(uipallet.Text, 0.4)
+	syncbutton.TextSize = 15
+	syncbutton.FontFace = uipallet.Font
+	syncbutton.Parent = children
+	addCorner(syncbutton)
+	addTooltip(syncbutton, 'Redownloads the profiles from GitHub and reinjects')
+
+	syncbutton.MouseEnter:Connect(function()
+		if syncing then return end
+		syncbutton.TextColor3 = uipallet.Text
+		tween:Tween(syncbutton, uipallet.Tween, {
+			BackgroundColor3 = color.Light(uipallet.Main, 0.14)
+		})
+	end)
+	syncbutton.MouseLeave:Connect(function()
+		if syncing then return end
+		syncbutton.TextColor3 = color.Dark(uipallet.Text, 0.4)
+		tween:Tween(syncbutton, uipallet.Tween, {
+			BackgroundColor3 = color.Light(uipallet.Main, 0.02)
+		})
+	end)
+	syncbutton.MouseButton1Click:Connect(function()
+		if syncing then return end
+		syncing = true
+		syncbutton.Text = 'Syncing...'
+
+		local synced, message = downloadProfiles()
+		if not synced then
+			syncing = false
+			syncbutton.Text = 'Sync to current profiles'
+			mainapi:CreateNotification('Vape', message, 10, 'alert')
+			return
+		end
+
+		-- The downloaded files are only settings on disk until something loads them, and the
+		-- autosave loop would write the in-memory profile straight back over them within
+		-- seconds, so Save is neutered and vape reinjects onto the fresh files. The result
+		-- message rides across the reload in shared.PistonwareSyncResult, which main.lua
+		-- turns into a notification once loading finishes.
+		syncbutton.Text = 'Reloading...'
+		mainapi.Save = function() end
+		shared.PistonwareSyncResult = message
+		shared.VapeCustomProfile = mainapi.Profile
+		shared.vapereload = true
+		if shared.PistonwareDeveloper then
+			loadstring(readfile('pistonware/loader.lua'), 'loader')()
+		else
+			loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true))()
+		end
+	end)
+end
 
 --[[
 	Targets
