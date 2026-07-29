@@ -6347,7 +6347,7 @@ mainapi.Scale = guipane:CreateToggle({
 	Function = function(callback)
 		scaleslider.Object.Visible = not callback
 		if callback then
-			scale.Scale = math.clamp(gameCamera.ViewportSize.X / 1920, 0.5, 1)
+			scale.Scale = math.clamp(gameCamera.ViewportSize.X / 1920, 0.4, 1)
 		else
 			scale.Scale = scaleslider.Value
 		end
