@@ -7494,6 +7494,31 @@ run(function()
 	})
 end)
 
+run(function()
+    local GodMode
+    GodMode = vape.Categories.Blatant:CreateModule({
+        Name = 'GodMode',
+        Function = function()
+            repeat task.wait() until (store.matchState ~= 0 or (not GodMode.Enabled)) and entitylib.isAlive
+            
+            replicatedStorage.rbxts_include.node_modules["@rbxts"].net.out._NetManaged.RequestSelfDeath:FireServer({
+                damageType = "Dorblx was here :')"
+            })
+
+            while lplr.Character:GetAttribute("Health") ~= 0 do
+                task.wait()
+            end
+
+            lplr.Character:SetAttribute("Health", 100)
+
+            notif('GodMode', 'GodMode Enabled ;)', 5)
+
+            return GodMode:Toggle()
+        end,
+        Tooltip = 'Please speed i need this [Cannot be turned off]' -- gotta find a way to respawn without dying
+    })
+end)																																																																																	
+
 -- == bedwars module loader ==
 -- Exposes shared.bedwars and loads the external obfuscatable module
 
