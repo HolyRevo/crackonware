@@ -120,7 +120,7 @@ local getcustomassets = {
 	['pistonware/assets/new/textv4.png'] = 'rbxassetid://14368357095',
 	['pistonware/assets/new/textvape.png'] = 'rbxassetid://14368358200',
 	['pistonware/assets/new/utilityicon.png'] = 'rbxassetid://14368359107',
-	['pistonware/assets/new/vape.png'] = 'rbxassetid://81301309131852',
+	['pistonware/assets/new/vape.png'] = 'rbxassetid://99295797606112',
 	['pistonware/assets/new/warning.png'] = 'rbxassetid://14368361552',
 	['pistonware/assets/new/worldicon.png'] = 'rbxassetid://14368362492'
 }
