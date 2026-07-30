@@ -1,3 +1,15 @@
+-- Two loader instances booting at once -- a double-tapped execute, or re-executing while
+-- the first run is still holding on the ROBLOX loading screen -- would stack two identical
+-- consoles and run every prompt and download twice (the hidden one's questions then time
+-- out to their fallbacks and replay after the visible one closes). Later executions bail
+-- while a boot is live; the timestamp goes stale after 180s so a boot that hard-crashed
+-- can't lock the session out of ever injecting again.
+if shared.PistonwareLoaderBoot and os.clock() - shared.PistonwareLoaderBoot < 180 then
+	warn('[pistonware] loader is already running, ignoring duplicate execution')
+	return
+end
+shared.PistonwareLoaderBoot = os.clock()
+
 local isfile = isfile or function(file)
 	local suc, res = pcall(function()
 		return readfile(file)
@@ -324,6 +336,9 @@ local AsciiShades = {
 -- delfolder already recurses on the executors that have it; the manual walk is for the ones
 -- that only ship delfile.
 local function deleteInstall()
+	-- every cancel/abort path comes through here, so a cancelled boot immediately frees the
+	-- duplicate-execution guard for the next manual run
+	shared.PistonwareLoaderBoot = nil
 	pcall(function()
 		if delfolder then
 			delfolder('pistonware')
@@ -1035,6 +1050,8 @@ injecting = false
 -- Loading' notification on a reload). Left set it would leak into the rest of the session,
 -- since main.lua never clears it and the next teleport/reinject sets it again anyway.
 shared.vapereload = nil
+-- Boot is over (successfully or not) -- reinjects and later manual runs may proceed.
+shared.PistonwareLoaderBoot = nil
 
 -- Cancelled while the GUI was already building: tear that back down too, then wipe whatever
 -- the run wrote after cancel's first pass.
