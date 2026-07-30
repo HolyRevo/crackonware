@@ -1,4 +1,3 @@
---This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 local loadstring = function(...)
 	local res, err = loadstring(...)
 	if err and vape then
@@ -8045,7 +8044,6 @@ run(function()
                             originalTransparency[face] = face.Transparency
                         end
                         face.Transparency = slider.Value
-						task.wait(0.1)
                     end
                 end
             end
@@ -8070,7 +8068,16 @@ run(function()
         Name = 'Transparency',
         Function = function(callback)
             if callback then
-                connection = runService.RenderStepped:Connect(setTransparency)
+                -- Reapplying does full GetChildren/GetDescendants sweeps of the
+                -- character; at 60fps that's hundreds of instance calls a frame.
+                -- 10Hz is visually identical (the game only rarely resets
+                -- transparency) and slider callbacks still apply instantly.
+                local nextApply = 0
+                connection = runService.RenderStepped:Connect(function()
+                    if os.clock() < nextApply then return end
+                    nextApply = os.clock() + 0.1
+                    setTransparency()
+                end)
             end
         end,
         Tooltip = 'Changes the visibility of your body parts on the client.'
