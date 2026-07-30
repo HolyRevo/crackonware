@@ -3214,17 +3214,28 @@ function mainapi:Load(skipgui, profile)
 
 	if inputService.TouchEnabled and #self.Keybind == 1 and self.Keybind[1] == 'RightShift' then
 		local button = Instance.new('TextButton')
-		button.Size = UDim2.fromOffset(32, 32)
-		button.Position = UDim2.new(1, -90, 0, 4)
+		button.Size = UDim2.fromOffset(110, 110)
+		button.AnchorPoint = Vector2.new(0.5, 0.5)
+		button.Position = UDim2.fromScale(0.5, 0.5)
 		button.BackgroundColor3 = Color3.new()
 		button.Text = ''
-		button.Parent = gui
+		-- Parented under scaledgui (which carries the `scale` UIScale), not the raw
+		-- `gui` ScreenGui the button used to sit in -- Offset sizes only shrink/grow
+		-- with the viewport for descendants of the scaled frame, so this was a fixed
+		-- 32x32 everywhere regardless of device. scaledgui itself is never hidden
+		-- (only ClickGui, nested inside it, is toggled), so this stays independent
+		-- of the modmenu's open/closed state exactly as before.
+		button.Parent = scaledgui
 		local image = Instance.new('ImageLabel')
-		image.Size = UDim2.fromOffset(26, 26)
-		image.Position = UDim2.fromOffset(3, 3)
+		image.AnchorPoint = Vector2.new(0.5, 0.5)
+		image.Size = UDim2.fromScale(0.8, 0.8)
+		image.Position = UDim2.fromScale(0.5, 0.5)
 		image.BackgroundTransparency = 1
 		image.Image = getcustomasset('pistonware/assets/old/vape.png')
 		image.Parent = button
+		local buttoncorner = Instance.new('UICorner')
+		buttoncorner.CornerRadius = UDim.new(1, 0)
+		buttoncorner.Parent = button
 		self.VapeButton = button
 		-- Options are already loaded by this point, so honour the saved setting on the
 		-- button we just built -- the toggle's own Function ran before it existed.
