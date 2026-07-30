@@ -1,4 +1,3 @@
---This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 local run = function(func) if shared.VapeSmoothBoot then task.wait() end func() end
 
 local cloneref = cloneref or function(obj)
