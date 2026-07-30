@@ -740,53 +740,35 @@ function namecallGuard.unwatch(inst, method)
     end
 end
 
--- Install the metatable hook exactly ONCE per session.
---
--- This file re-executes on every script reload. The registry above is deliberately
--- rebuilt each time (see the SetInvItem note in bedwars.lua), but the old code also
--- re-captured mt.__namecall on each run -- so reload N left N of our wrappers chained
--- together, and EVERY namecall in the game walked the whole chain before reaching the
--- engine. Attacking is by far the hottest namecall path (the killaura fires per target
--- per frame, plus switchItem's equip), which is exactly why clients that had reloaded
--- a few times crashed while attacking and nowhere else: the chain got deep enough to
--- blow the C stack. Keep one hook and just re-point it at this execution's registry.
-local guardState = genv.__pistonwareNamecallGuard
-if guardState then
-    guardState.watch = namecallWatch
-else
-    guardState = {watch = namecallWatch}
-    genv.__pistonwareNamecallGuard = guardState
-
-    local getnamecallmethod = getnamecallmethod
-    local mt = getrawmetatable(game)
-    setreadonly(mt, false)
-    local oldNamecall = mt.__namecall
-    mt.__namecall = function(self, ...)
-        local method = getnamecallmethod()
-        if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
-            local pp = self.PrimaryPart
-                or self:FindFirstChild("HumanoidRootPart")
-                or self:FindFirstChildWhichIsA("BasePart")
-            if pp then
-                return pp.CFrame
-            else
-                return CFrame.new()
-            end
+local getnamecallmethod = getnamecallmethod
+local mt = getrawmetatable(game)
+setreadonly(mt, false)
+local oldNamecall = mt.__namecall
+mt.__namecall = function(self, ...)
+    local method = getnamecallmethod()
+    if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
+        local pp = self.PrimaryPart
+            or self:FindFirstChild("HumanoidRootPart")
+            or self:FindFirstChildWhichIsA("BasePart")
+        if pp then
+            return pp.CFrame
+        else
+            return CFrame.new()
         end
-        local entry = guardState.watch[self]
-        if entry then
-            local handler = entry[method]
-            if handler == true then
-                return
-            elseif handler then
-                local ok, blocked = pcall(handler, self, ...)
-                if ok and blocked then return end
-            end
-        end
-        return oldNamecall(self, ...)
     end
-    setreadonly(mt, true)
+    local entry = namecallWatch[self]
+    if entry then
+        local handler = entry[method]
+        if handler == true then
+            return
+        elseif handler then
+            local ok, blocked = pcall(handler, self, ...)
+            if ok and blocked then return end
+        end
+    end
+    return oldNamecall(self, ...)
 end
+setreadonly(mt, true)
 
 local blankFunction = function(...) return ... end
 
@@ -854,53 +836,15 @@ local function entryMatches(objName, list)
     return false
 end
 
--- Placeholders handed back by a failed grab. Tracked so they never get fed back INTO
--- the debug library -- see safeGetProto.
-local protoStubs = setmetatable({}, {__mode = 'k'})
-
--- Returning nil here used to make the caller's table entry VANISH (a nil value in a
--- table constructor stores no key), so a failed grab produced no error and no warning
--- -- the remote was just silently missing forever. Hand back an empty stub instead: it
--- carries no constants, so the remote loop reports it by name like any other miss.
-local function stubProto()
-    local stub = function() end
-    protoStubs[stub] = true
-    return stub
-end
-
--- Some executors return nil (rather than erroring) for an out-of-range index, in which
--- case the old `if success then return proto` handed nil back as a success -- so check
--- the result is really a function.
---
--- The stub check matters: entries below nest these calls, e.g.
--- safeGetProto(safeGetProto(f, 2), 5). If the inner grab failed we must NOT then ask
--- the debug library for proto 5 of an empty closure. Out-of-range getproto is not a
--- defined operation and several executors fault in C rather than raising something
--- pcall can catch, so the only safe move is to never make the call.
 local function safeGetProto(func, index)
-    if type(func) ~= 'function' or protoStubs[func] then return stubProto() end
-    if type(debug) ~= 'table' or type(debug.getproto) ~= 'function' then
-        return stubProto()
-    end
-
-    local ok, proto = pcall(debug.getproto, func, index)
-    if ok and type(proto) == 'function' then
+    if not func then return nil end
+    local success, proto = pcall(debug.getproto, func, index)
+    if success then
         return proto
+    else
+        warn("function:", func, "index:", index)
+        return nil
     end
-
-    return stubProto()
-end
-
--- No type() check on the result. Executors do not agree on what getconstants hands
--- back -- some give a plain table, others a proxy that answers generalized iteration
--- and indexing but reports a type() other than 'table'. Gating on type()=='table' here
--- returned nil for EVERY function on those executors, so no remote resolved at all.
--- dumpRemote deals with the shape.
-local function getConstants(func)
-    if type(func) ~= 'function' then return nil end
-    local ok, consts = pcall(debug.getconstants, func)
-    if ok then return consts end
-    return nil
 end
 
 -- pistonware funcs
@@ -1027,70 +971,23 @@ run(function()
 		WarlockTarget = safeGetProto(Knit.Controllers.WarlockStaffController.KnitStart, 2)
 	}
 
-	-- Methods you reach a remote through. Luau interns each unique constant once, in
-	-- first-use order, so `default.Client:Get("AimCannon")` lays down "Client", "Get",
-	-- "AimCannon" -- and the old `tab[ind + 1]` returned "Get". When "Get" happens to
-	-- have been interned earlier in the same proto the name DOES land right after
-	-- "Client", which is why this worked for some remotes and not others. Skip over
-	-- accessors instead of assuming either layout.
-	local clientAccessors = {Get = true, WaitFor = true, GetAsync = true, OnEvent = true}
-
 	local function dumpRemote(tab)
-		if tab == nil then return '' end
-
-		-- Find "Client" with generalized `for ... in tab`, exactly as the original did.
-		-- NOT pairs(), and no type()=='table' gate: on executors where getconstants
-		-- returns a proxy rather than a plain table, both of those see an empty sequence
-		-- and every single remote resolves to ''.
 		local ind
-		local ok = pcall(function()
-			for i, v in tab do
-				if v == 'Client' then
-					ind = i
-					break
-				end
+		for i, v in tab do
+			if v == 'Client' then
+				ind = i
+				break
 			end
-		end)
-		if not ok or not ind then return '' end
-
-		-- Luau interns each unique constant once, in first-use order, so
-		-- `default.Client:Get("AimCannon")` lays down "Client", "Get", "AimCannon" and
-		-- the original tab[ind + 1] returned "Get". Where "Get" was already interned
-		-- earlier in the same proto the name DOES land directly after "Client", which is
-		-- why this worked for some remotes and not others. Step over the accessor when
-		-- that is what's sitting there, otherwise behave exactly as before.
-		local name = tab[ind + 1]
-		if clientAccessors[name] then
-			name = tab[ind + 2]
 		end
-		if type(name) == 'string' and name ~= '' then return name end
-		return ''
+		return ind and tab[ind + 1] or ''
 	end
 
-	-- No fallback proto scanning here, deliberately. An earlier version swept the
-	-- parent's sibling protos on a miss to survive the game shifting a closure index.
-	-- That is a real failure mode, but the recovery is worse than the disease: every
-	-- probe past the end of a proto list is an out-of-range debug.getproto, which is not
-	-- a defined operation and faults in C on some executors rather than raising anything
-	-- pcall can catch. When a single unrelated bug made all ~30 entries miss at once, the
-	-- sweep turned into hundreds of those probes and took the client down on execute.
-	-- Keep the debug-library surface to exactly one getproto per entry, at the recorded
-	-- index -- if an index goes stale after a game update, fix the index.
-	local missingRemotes = {}
 	for i, v in remoteNames do
-		local remote = dumpRemote(getConstants(v))
+		local remote = dumpRemote(debug.getconstants(v))
 		if remote == '' then
-			missingRemotes[#missingRemotes + 1] = i
+			notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
 		end
 		remotes[i] = remote
-	end
-
-	-- One notification, not one per remote: safeGetProto no longer drops failed entries
-	-- out of the table, so on an executor with a weak debug library this would otherwise
-	-- spawn ~20 alerts at once.
-	if #missingRemotes > 0 then
-		table.sort(missingRemotes)
-		notif('Pistonware', 'Failed to grab remote(s): '..table.concat(missingRemotes, ', '), 10, 'alert')
 	end
 
 	OldBreak = bedwars.BlockController.isBlockBreakable
