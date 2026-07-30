@@ -1,3 +1,4 @@
+print('yo')
 local mainapi = {
 	Categories = {},
 	GUIColor = {
