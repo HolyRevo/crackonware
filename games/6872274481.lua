@@ -854,24 +854,17 @@ local function entryMatches(objName, list)
     return false
 end
 
--- Where each proto came from, so a caller that got a useless proto can go back and
--- scan the parent's other protos. Weak keys: a proto we never end up using is garbage.
-local protoSource = setmetatable({}, {__mode = 'k'})
 -- Placeholders handed back by a failed grab. Tracked so they never get fed back INTO
 -- the debug library -- see safeGetProto.
 local protoStubs = setmetatable({}, {__mode = 'k'})
 
 -- Returning nil here used to make the caller's table entry VANISH (a nil value in a
 -- table constructor stores no key), so a failed grab produced no error and no warning
--- -- the remote was just silently missing forever. Hand back an empty stub instead:
--- it carries no constants, so the remote loop reports it by name like any other miss,
--- and protoSource still records the parent so the fallback scan can try to recover.
-local function stubProto(func, index)
+-- -- the remote was just silently missing forever. Hand back an empty stub instead: it
+-- carries no constants, so the remote loop reports it by name like any other miss.
+local function stubProto()
     local stub = function() end
     protoStubs[stub] = true
-    if type(func) == 'function' and not protoStubs[func] then
-        protoSource[stub] = {func, index}
-    end
     return stub
 end
 
@@ -885,24 +878,28 @@ end
 -- defined operation and several executors fault in C rather than raising something
 -- pcall can catch, so the only safe move is to never make the call.
 local function safeGetProto(func, index)
-    if type(func) ~= 'function' or protoStubs[func] then return stubProto(func, index) end
+    if type(func) ~= 'function' or protoStubs[func] then return stubProto() end
     if type(debug) ~= 'table' or type(debug.getproto) ~= 'function' then
-        return stubProto(func, index)
+        return stubProto()
     end
 
     local ok, proto = pcall(debug.getproto, func, index)
     if ok and type(proto) == 'function' then
-        protoSource[proto] = {func, index}
         return proto
     end
 
-    return stubProto(func, index)
+    return stubProto()
 end
 
+-- No type() check on the result. Executors do not agree on what getconstants hands
+-- back -- some give a plain table, others a proxy that answers generalized iteration
+-- and indexing but reports a type() other than 'table'. Gating on type()=='table' here
+-- returned nil for EVERY function on those executors, so no remote resolved at all.
+-- dumpRemote deals with the shape.
 local function getConstants(func)
     if type(func) ~= 'function' then return nil end
     local ok, consts = pcall(debug.getconstants, func)
-    if ok and type(consts) == 'table' then return consts end
+    if ok then return consts end
     return nil
 end
 
@@ -1039,78 +1036,49 @@ run(function()
 	local clientAccessors = {Get = true, WaitFor = true, GetAsync = true, OnEvent = true}
 
 	local function dumpRemote(tab)
-		if type(tab) ~= 'table' then return '' end
-		-- getconstants can come back with holes (a nil constant), and pairs order is
-		-- not index order, so walk a real 1..n range rather than iterating the table.
-		-- n is clamped: this runs against whatever the executor's debug library hands
-		-- back, and a single bogus index would otherwise turn the loops below into a
-		-- multi-million iteration freeze at load.
-		local n = 0
-		for k in pairs(tab) do
-			if type(k) == 'number' and k > n then n = k end
-		end
-		if n > 512 then n = 512 end
-		local clientAt
-		for i = 1, n do
-			if tab[i] == 'Client' then
-				clientAt = i
-				break
+		if tab == nil then return '' end
+
+		-- Find "Client" with generalized `for ... in tab`, exactly as the original did.
+		-- NOT pairs(), and no type()=='table' gate: on executors where getconstants
+		-- returns a proxy rather than a plain table, both of those see an empty sequence
+		-- and every single remote resolves to ''.
+		local ind
+		local ok = pcall(function()
+			for i, v in tab do
+				if v == 'Client' then
+					ind = i
+					break
+				end
 			end
+		end)
+		if not ok or not ind then return '' end
+
+		-- Luau interns each unique constant once, in first-use order, so
+		-- `default.Client:Get("AimCannon")` lays down "Client", "Get", "AimCannon" and
+		-- the original tab[ind + 1] returned "Get". Where "Get" was already interned
+		-- earlier in the same proto the name DOES land directly after "Client", which is
+		-- why this worked for some remotes and not others. Step over the accessor when
+		-- that is what's sitting there, otherwise behave exactly as before.
+		local name = tab[ind + 1]
+		if clientAccessors[name] then
+			name = tab[ind + 2]
 		end
-		if not clientAt then return '' end
-		for i = clientAt + 1, n do
-			local v = tab[i]
-			if type(v) == 'string' and v ~= '' and not clientAccessors[v] then
-				return v
-			end
-		end
+		if type(name) == 'string' and name ~= '' then return name end
 		return ''
 	end
 
-	-- The hardcoded proto indices above are only valid for the game build they were
-	-- written against: adding or removing one closure anywhere earlier in the parent
-	-- shifts every index after it, and we then read constants off an unrelated closure.
-	-- That is a common cause of "Failed to grab remote (X)" after a bedwars update, so
-	-- on a miss, sweep the parent's OTHER direct protos for one that references Client.
-	--
-	-- Deliberately flat and hard-capped. An earlier version recursed three levels deep
-	-- with a 64-wide loop per level, relying on getproto returning nil past the end to
-	-- terminate early -- but out-of-range getproto is undefined and some executors hand
-	-- back something function-shaped, so the loop ran to its bound and the walk became
-	-- 64^3 pcall+getconstants pairs PER failed remote. With a broken debug library every
-	-- entry fails at once and that froze the client on execute. One level, 24 wide, and
-	-- a budget shared across the whole pass.
-	local PROTO_SCAN_WIDTH = 24
-	local scanBudget = 300
-
-	local function scanSiblings(parent, skipIndex)
-		if type(parent) ~= 'function' or protoStubs[parent] then return '' end
-		for i = 1, PROTO_SCAN_WIDTH do
-			if scanBudget <= 0 then return '' end
-			if i ~= skipIndex then
-				scanBudget -= 1
-				local ok, child = pcall(debug.getproto, parent, i)
-				-- past the last proto (or unsupported) -- stop, don't keep poking
-				if not ok or type(child) ~= 'function' then return '' end
-				local found = dumpRemote(getConstants(child))
-				if found ~= '' then return found end
-			end
-		end
-		return ''
-	end
-
+	-- No fallback proto scanning here, deliberately. An earlier version swept the
+	-- parent's sibling protos on a miss to survive the game shifting a closure index.
+	-- That is a real failure mode, but the recovery is worse than the disease: every
+	-- probe past the end of a proto list is an out-of-range debug.getproto, which is not
+	-- a defined operation and faults in C on some executors rather than raising anything
+	-- pcall can catch. When a single unrelated bug made all ~30 entries miss at once, the
+	-- sweep turned into hundreds of those probes and took the client down on execute.
+	-- Keep the debug-library surface to exactly one getproto per entry, at the recorded
+	-- index -- if an index goes stale after a game update, fix the index.
 	local missingRemotes = {}
 	for i, v in remoteNames do
 		local remote = dumpRemote(getConstants(v))
-
-		if remote == '' then
-			-- recorded index gave us the wrong closure (or none) -- try its siblings
-			local src = protoSource[v]
-			if src then
-				remote = scanSiblings(src[1], src[2])
-			end
-		end
-
 		if remote == '' then
 			missingRemotes[#missingRemotes + 1] = i
 		end
