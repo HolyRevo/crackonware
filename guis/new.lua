@@ -5507,6 +5507,9 @@ function mainapi:Load(skipgui, profile)
 		local buttoncorner = Instance.new('UICorner')
 		buttoncorner.Parent = button
 		self.VapeButton = button
+		-- Options are already loaded by this point, so honour the saved setting on the
+		-- button we just built -- the toggle's own Function ran before it existed.
+		button.Visible = not (self.HideVapeButton and self.HideVapeButton.Enabled)
 		button.MouseButton1Click:Connect(function()
 			if self.ThreadFix then
 				setthreadidentity(8)
@@ -6279,6 +6282,13 @@ general:CreateButton({
 	end,
 	Tooltip = 'Reloads vape for debugging purposes'
 })
+general:CreateButton({
+	Name = 'Reinstall',
+	Function = function()
+		loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/reinstall.lua', true))()
+	end,
+	Tooltip = 'Uninjects, deletes the pistonware folder and downloads everything again'
+})
 
 --[[
 	Module Settings
@@ -6371,6 +6381,15 @@ scaleslider = guipane:CreateSlider({
 	Default = 1,
 	Darker = true,
 	Visible = false
+})
+mainapi.HideVapeButton = guipane:CreateToggle({
+	Name = 'Hide Pistonware Mobile Button',
+	Function = function(callback)
+		if mainapi.VapeButton then
+			mainapi.VapeButton.Visible = not callback
+		end
+	end,
+	Tooltip = 'Hides the Pistonware button in the top right on mobile\nOpen the GUI with your keybind instead'
 })
 guipane:CreateDropdown({
 	Name = 'GUI Theme',
