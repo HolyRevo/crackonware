@@ -445,11 +445,15 @@ local sortmethods = {
 		return a.Entity.Health < b.Entity.Health
 	end,
 	Angle = function(a, b)
-		local selfrootpos = entitylib.character.RootPart.Position
-		local localfacing = entitylib.character.RootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
-		local angle = math.acos(localfacing:Dot(((a.Entity.RootPart.Position - selfrootpos) * Vector3.new(1, 0, 1)).Unit))
-		local angle2 = math.acos(localfacing:Dot(((b.Entity.RootPart.Position - selfrootpos) * Vector3.new(1, 0, 1)).Unit))
-		return angle < angle2
+		-- acos is monotonically DECREASING on [-1, 1], so comparing the raw dots
+		-- the other way round gives the identical ordering without two acos calls
+		-- per comparison -- this runs O(n log n) per Heartbeat when sorting by Angle
+		local selfroot = entitylib.character.RootPart
+		local selfrootpos = selfroot.Position
+		local localfacing = selfroot.CFrame.LookVector * Vector3.new(1, 0, 1)
+		local dota = localfacing:Dot(((a.Entity.RootPart.Position - selfrootpos) * Vector3.new(1, 0, 1)).Unit)
+		local dotb = localfacing:Dot(((b.Entity.RootPart.Position - selfrootpos) * Vector3.new(1, 0, 1)).Unit)
+		return dota > dotb
 	end
 }
 
@@ -1916,17 +1920,64 @@ end)
 run(function()
 	local FastBreak
 	local Time
-	
+	local BlacklistBeds
+	local BlacklistOres
+
+	-- The cooldown the game ships with, restored on disable and used as the "don't
+	-- speed this one up" value for blacklisted blocks.
+	local VANILLA_COOLDOWN = 0.3
+
+	-- Name of the block currently under the crosshair, read through the same block
+	-- selector AutoTool and Schematica use. Mode 1 is SELECT (the block being looked
+	-- at); mode 0 is PLACE, which resolves to the empty cell in front of it instead.
+	local function targetedBlockName()
+		local ok, name = pcall(function()
+			local breaker = bedwars.BlockBreakController.blockBreaker
+			local info = breaker.clientManager:getBlockSelector():getMouseInfo(1)
+			local target = info and info.target
+			local block = target and target.blockInstance
+			return block and block.Name
+		end)
+		return ok and name or nil
+	end
+
+	-- Ores are named <material>_ore_mesh_block. Matched as a plain substring plus a
+	-- trailing _ore, so diamond/emerald/gold are covered without hardcoding a list
+	-- that a new ore would silently fall out of. Neither pattern can hit 'store' or
+	-- 'core' -- both need the underscore.
+	local function isOre(name)
+		return name:find('ore_mesh_block', 1, true) ~= nil or name:match('_ore$') ~= nil
+	end
+
+	local function currentCooldown()
+		local name = targetedBlockName()
+		if name then
+			if BlacklistBeds.Enabled and name == 'bed' then return VANILLA_COOLDOWN end
+			if BlacklistOres.Enabled and isOre(name) then return VANILLA_COOLDOWN end
+		end
+		return Time.Value
+	end
+
 	FastBreak = vape.Categories.Blatant:CreateModule({
 		Name = 'FastBreak',
 		Function = function(callback)
 			if callback then
 				repeat
-					bedwars.BlockBreakController.blockBreaker:setCooldown(Time.Value)
-					task.wait(0.1)
+					-- With both blacklists off this is the original once-per-100ms
+					-- setCooldown and costs exactly what it used to. With one on we need
+					-- to react the frame the crosshair moves onto a bed/ore, otherwise
+					-- the stale value lets a fast hit or two through before the next
+					-- poll catches up -- so tighten to per-frame only in that case.
+					local filtering = BlacklistBeds.Enabled or BlacklistOres.Enabled
+					bedwars.BlockBreakController.blockBreaker:setCooldown(filtering and currentCooldown() or Time.Value)
+					if filtering then
+						task.wait()
+					else
+						task.wait(0.1)
+					end
 				until not FastBreak.Enabled
 			else
-				bedwars.BlockBreakController.blockBreaker:setCooldown(0.3)
+				bedwars.BlockBreakController.blockBreaker:setCooldown(VANILLA_COOLDOWN)
 			end
 		end,
 		Tooltip = 'Decreases block hit cooldown'
@@ -1938,6 +1989,14 @@ run(function()
 		Default = 0.25,
 		Decimal = 100,
 		Suffix = function(val) return 's' end
+	})
+	BlacklistBeds = FastBreak:CreateToggle({
+		Name = 'Blacklist Beds',
+		Tooltip = 'Breaks beds at the normal speed instead'
+	})
+	BlacklistOres = FastBreak:CreateToggle({
+		Name = 'Blacklist Ores',
+		Tooltip = 'Breaks ores at the normal speed instead'
 	})
 end)
 	
@@ -6314,22 +6373,23 @@ end)
 run(function()
 	local HitColor
 	local Color
-	local done = {}
+	-- weak keys so highlights destroyed mid-session don't sit in here until disable
+	local done = setmetatable({}, {__mode = 'k'})
 	
 	HitColor = vape.Legit:CreateModule({
 		Name = 'Hit Color',
 		Function = function(callback)
-			if callback then 
+			if callback then
 				repeat
 					-- same colour for every entity this tick; compute once, not per-entity
 					local fill = Color3.fromHSV(Color.Hue, Color.Sat, Color.Value)
 					local trans = Color.Opacity
-					for i, v in entitylib.List do
+					for _, v in entitylib.List do
 						local highlight = v.Character and v.Character:FindFirstChild('_DamageHighlight_')
-						if highlight then 
-							if not table.find(done, highlight) then 
-								table.insert(done, highlight) 
-							end
+						if highlight then
+							-- set, not array: the table.find here was a linear scan
+							-- per entity per tick that only grew as highlights piled up
+							done[highlight] = true
 							highlight.FillColor = fill
 							highlight.FillTransparency = trans
 						end
@@ -6337,7 +6397,7 @@ run(function()
 					task.wait(0.1)
 				until not HitColor.Enabled
 			else
-				for i, v in done do 
+				for v in next, done do
 					v.FillColor = Color3.new(1, 0, 0)
 					v.FillTransparency = 0.4
 				end
