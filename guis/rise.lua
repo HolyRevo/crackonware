@@ -2305,7 +2305,7 @@ function mainapi:Load(skipgui, profile)
 		guidata = loadJson('pistonware/profiles/'..game.GameId..'.gui.txt')
 		if not guidata then
 			guidata = {Categories = {}}
-			self:CreateNotification('Vape', 'Failed to load GUI settings.', 10, 'alert')
+			self:CreateNotification('Pistonware', 'Failed to load GUI settings.', 10, 'alert')
 			savecheck = false
 		end
 
@@ -2339,7 +2339,7 @@ function mainapi:Load(skipgui, profile)
 				Modules = {},
 				Legit = {}
 			}
-			self:CreateNotification('Vape', 'Failed to load '..self.Profile..' profile.', 10, 'alert')
+			self:CreateNotification('Pistonware', 'Failed to load '..self.Profile..' profile.', 10, 'alert')
 			savecheck = false
 		end
 
@@ -2719,7 +2719,7 @@ end
 
 local function latestProfileCommit()
 	local suc, res = pcall(function()
-		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&per_page=1', true)
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
 	end)
 	if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
 	local ok, body = pcall(function()
@@ -2735,12 +2735,15 @@ local function hasBothConfigs()
 	return isfile('pistonware/profiles/blatant'..mainapi.Place..'.txt') and isfile('pistonware/profiles/legit'..mainapi.Place..'.txt')
 end
 
-local function downloadProfileFile(path)
+-- Pinned to the commit the check reported rather than to the branch path: raw.githubusercontent
+-- serves CDN-cached content for a few minutes after a push, so a branch-head fetch can quietly
+-- reinstall the old profiles and then get stamped with the new commit, blocking every later sync.
+local function downloadProfileFile(path, commit)
 	local relPath = select(1, path:gsub('pistonware/', ''))
 	local content
 	for attempt = 1, 4 do
 		local suc, res = pcall(function()
-			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
+			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..(commit or 'main')..'/'..relPath, true)
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			content = res
@@ -2754,9 +2757,10 @@ local function downloadProfileFile(path)
 	return (pcall(writefile, path, content))
 end
 
-local function downloadProfiles()
+local function downloadProfiles(commit)
 	local reqSuc, res = pcall(function()
-		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles', true)
+		-- listing pinned too, so it can never describe a different commit than the files below
+		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(commit and ('?ref='..commit) or ''), true)
 	end)
 	if not (reqSuc and res and res ~= '' and res ~= '404: Not Found') then
 		return nil, 'Profile sync failed (could not reach GitHub).'
@@ -2784,7 +2788,7 @@ local function downloadProfiles()
 	local done = Instance.new('BindableEvent')
 	for _, v in files do
 		task.spawn(function()
-			if downloadProfileFile('pistonware/'.. ({v.path:gsub(' ', '%%20')})[1]) then
+			if downloadProfileFile('pistonware/'.. ({v.path:gsub(' ', '%%20')})[1], commit) then
 				synced += 1
 			else
 				failed += 1
@@ -2855,7 +2859,7 @@ do
 		if latest and latest == localProfileCommit() and hasBothConfigs() then
 			syncing = false
 			synctitle.Text = 'Profiles already up to date'
-			mainapi:CreateNotification('Vape', 'Profiles are already on the latest commit, nothing to sync.', 10)
+			mainapi:CreateNotification('Pistonware', 'Profiles are already on the latest commit, nothing to sync.', 10)
 			return
 		end
 
@@ -2864,11 +2868,11 @@ do
 		-- GUI between two states -- whatever does arrive replaces this a moment later.
 		pcall(function() mainapi:Save() end)
 
-		local synced, message = downloadProfiles()
+		local synced, message = downloadProfiles(latest)
 		syncing = false
 		if not synced then
 			synctitle.Text = 'Sync to current profiles'
-			mainapi:CreateNotification('Vape', message, 10, 'alert')
+			mainapi:CreateNotification('Pistonware', message, 10, 'alert')
 			return
 		end
 		-- Stamped only once the files are down, and only when the commit was readable in the first
@@ -2888,7 +2892,7 @@ do
 		pending, syncmessage = true, message
 		synctitle.Text = 'Synced, choose a config'
 		refreshConfigButtons()
-		mainapi:CreateNotification('Vape', message..' Choose Blatant or Legit below to load one.', 10)
+		mainapi:CreateNotification('Pistonware', message..' Choose Blatant or Legit below to load one.', 10)
 	end)
 
 	-- Which shipped config loads by default. There is nothing extra to persist: the default is
@@ -2932,7 +2936,7 @@ do
 
 	local function selectConfig(name)
 		if not isfile('pistonware/profiles/'..name..mainapi.Place..'.txt') then
-			mainapi:CreateNotification('Vape', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
+			mainapi:CreateNotification('Pistonware', 'There is no '..name..' config for this game yet, press Sync to current profiles first.', 10, 'alert')
 			return
 		end
 		-- Always a full reload, never an in-place profile switch. The GUI theme colour, window
