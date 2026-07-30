@@ -854,9 +854,12 @@ local function entryMatches(objName, list)
     return false
 end
 
--- Where each proto came from, so a caller that gets a useless proto can go back and
+-- Where each proto came from, so a caller that got a useless proto can go back and
 -- scan the parent's other protos. Weak keys: a proto we never end up using is garbage.
 local protoSource = setmetatable({}, {__mode = 'k'})
+-- Placeholders handed back by a failed grab. Tracked so they never get fed back INTO
+-- the debug library -- see safeGetProto.
+local protoStubs = setmetatable({}, {__mode = 'k'})
 
 -- Returning nil here used to make the caller's table entry VANISH (a nil value in a
 -- table constructor stores no key), so a failed grab produced no error and no warning
@@ -865,18 +868,24 @@ local protoSource = setmetatable({}, {__mode = 'k'})
 -- and protoSource still records the parent so the fallback scan can try to recover.
 local function stubProto(func, index)
     local stub = function() end
-    protoSource[stub] = {func, index}
+    protoStubs[stub] = true
+    if type(func) == 'function' and not protoStubs[func] then
+        protoSource[stub] = {func, index}
+    end
     return stub
 end
 
--- debug.getproto has two shapes across executors:
---   getproto(f, i)       -> the prototype itself, as a non-callable closure
---   getproto(f, i, true) -> a table of that prototype's *active* closures
--- Some only implement the second, and some return nil (rather than erroring) for an
--- out-of-range index -- in which case the old `if success then return proto` handed
--- back nil as a success. Try both shapes and only accept an actual function.
+-- Some executors return nil (rather than erroring) for an out-of-range index, in which
+-- case the old `if success then return proto` handed nil back as a success -- so check
+-- the result is really a function.
+--
+-- The stub check matters: entries below nest these calls, e.g.
+-- safeGetProto(safeGetProto(f, 2), 5). If the inner grab failed we must NOT then ask
+-- the debug library for proto 5 of an empty closure. Out-of-range getproto is not a
+-- defined operation and several executors fault in C rather than raising something
+-- pcall can catch, so the only safe move is to never make the call.
 local function safeGetProto(func, index)
-    if type(func) ~= 'function' then return stubProto(func, index) end
+    if type(func) ~= 'function' or protoStubs[func] then return stubProto(func, index) end
     if type(debug) ~= 'table' or type(debug.getproto) ~= 'function' then
         return stubProto(func, index)
     end
@@ -885,12 +894,6 @@ local function safeGetProto(func, index)
     if ok and type(proto) == 'function' then
         protoSource[proto] = {func, index}
         return proto
-    end
-
-    local activeOk, active = pcall(debug.getproto, func, index, true)
-    if activeOk and type(active) == 'table' and type(active[1]) == 'function' then
-        protoSource[active[1]] = {func, index}
-        return active[1]
     end
 
     return stubProto(func, index)
@@ -1038,11 +1041,15 @@ run(function()
 	local function dumpRemote(tab)
 		if type(tab) ~= 'table' then return '' end
 		-- getconstants can come back with holes (a nil constant), and pairs order is
-		-- not index order, so walk a real 1..n range rather than iterating the table
+		-- not index order, so walk a real 1..n range rather than iterating the table.
+		-- n is clamped: this runs against whatever the executor's debug library hands
+		-- back, and a single bogus index would otherwise turn the loops below into a
+		-- multi-million iteration freeze at load.
 		local n = 0
 		for k in pairs(tab) do
 			if type(k) == 'number' and k > n then n = k end
 		end
+		if n > 512 then n = 512 end
 		local clientAt
 		for i = 1, n do
 			if tab[i] == 'Client' then
@@ -1063,25 +1070,36 @@ run(function()
 	-- The hardcoded proto indices above are only valid for the game build they were
 	-- written against: adding or removing one closure anywhere earlier in the parent
 	-- shifts every index after it, and we then read constants off an unrelated closure.
-	-- That -- not a missing debug library -- is the usual cause of "Failed to grab
-	-- remote (X)" after a bedwars update. Scan the parent's other protos for one that
-	-- actually references Client, two levels deep since several entries above are
-	-- already nested safeGetProto calls.
-	local function scanProtos(func, skipIndex, depth)
-		if type(func) ~= 'function' or (depth or 0) > 2 then return '' end
-		for i = 1, 64 do
-			local ok, child = pcall(debug.getproto, func, i)
-			if not ok or type(child) ~= 'function' then break end
+	-- That is a common cause of "Failed to grab remote (X)" after a bedwars update, so
+	-- on a miss, sweep the parent's OTHER direct protos for one that references Client.
+	--
+	-- Deliberately flat and hard-capped. An earlier version recursed three levels deep
+	-- with a 64-wide loop per level, relying on getproto returning nil past the end to
+	-- terminate early -- but out-of-range getproto is undefined and some executors hand
+	-- back something function-shaped, so the loop ran to its bound and the walk became
+	-- 64^3 pcall+getconstants pairs PER failed remote. With a broken debug library every
+	-- entry fails at once and that froze the client on execute. One level, 24 wide, and
+	-- a budget shared across the whole pass.
+	local PROTO_SCAN_WIDTH = 24
+	local scanBudget = 300
+
+	local function scanSiblings(parent, skipIndex)
+		if type(parent) ~= 'function' or protoStubs[parent] then return '' end
+		for i = 1, PROTO_SCAN_WIDTH do
+			if scanBudget <= 0 then return '' end
 			if i ~= skipIndex then
+				scanBudget -= 1
+				local ok, child = pcall(debug.getproto, parent, i)
+				-- past the last proto (or unsupported) -- stop, don't keep poking
+				if not ok or type(child) ~= 'function' then return '' end
 				local found = dumpRemote(getConstants(child))
 				if found ~= '' then return found end
 			end
-			local nested = scanProtos(child, nil, (depth or 0) + 1)
-			if nested ~= '' then return nested end
 		end
 		return ''
 	end
 
+	local missingRemotes = {}
 	for i, v in remoteNames do
 		local remote = dumpRemote(getConstants(v))
 
@@ -1089,18 +1107,22 @@ run(function()
 			-- recorded index gave us the wrong closure (or none) -- try its siblings
 			local src = protoSource[v]
 			if src then
-				remote = scanProtos(src[1], src[2])
+				remote = scanSiblings(src[1], src[2])
 			end
-		end
-		if remote == '' then
-			-- or the remote call sits in a closure nested inside what we were handed
-			remote = scanProtos(v)
 		end
 
 		if remote == '' then
-			notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
+			missingRemotes[#missingRemotes + 1] = i
 		end
 		remotes[i] = remote
+	end
+
+	-- One notification, not one per remote: safeGetProto no longer drops failed entries
+	-- out of the table, so on an executor with a weak debug library this would otherwise
+	-- spawn ~20 alerts at once.
+	if #missingRemotes > 0 then
+		table.sort(missingRemotes)
+		notif('Pistonware', 'Failed to grab remote(s): '..table.concat(missingRemotes, ', '), 10, 'alert')
 	end
 
 	OldBreak = bedwars.BlockController.isBlockBreakable
