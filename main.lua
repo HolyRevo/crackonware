@@ -1,4 +1,3 @@
---This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.
 if shared.vape then shared.vape:Uninject() end
 
 local vape
