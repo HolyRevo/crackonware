@@ -3213,6 +3213,12 @@ mainapi.Categories.Main:CreateButton({
 	end
 })
 mainapi.Categories.Main:CreateButton({
+	Name = 'Reinstall',
+	Function = function()
+		loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/refs/heads/main/reinstall.lua', true))()
+	end
+})
+mainapi.Categories.Main:CreateButton({
 	Name = 'Uninject',
 	Function = function()
 		mainapi:Uninject()
