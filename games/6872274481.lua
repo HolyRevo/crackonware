@@ -740,35 +740,53 @@ function namecallGuard.unwatch(inst, method)
     end
 end
 
-local getnamecallmethod = getnamecallmethod
-local mt = getrawmetatable(game)
-setreadonly(mt, false)
-local oldNamecall = mt.__namecall
-mt.__namecall = function(self, ...)
-    local method = getnamecallmethod()
-    if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
-        local pp = self.PrimaryPart
-            or self:FindFirstChild("HumanoidRootPart")
-            or self:FindFirstChildWhichIsA("BasePart")
-        if pp then
-            return pp.CFrame
-        else
-            return CFrame.new()
+-- Install the metatable hook exactly ONCE per session.
+--
+-- This file re-executes on every script reload. The registry above is deliberately
+-- rebuilt each time (see the SetInvItem note in bedwars.lua), but the old code also
+-- re-captured mt.__namecall on each run -- so reload N left N of our wrappers chained
+-- together, and EVERY namecall in the game walked the whole chain before reaching the
+-- engine. Attacking is by far the hottest namecall path (the killaura fires per target
+-- per frame, plus switchItem's equip), which is exactly why clients that had reloaded
+-- a few times crashed while attacking and nowhere else: the chain got deep enough to
+-- blow the C stack. Keep one hook and just re-point it at this execution's registry.
+local guardState = genv.__pistonwareNamecallGuard
+if guardState then
+    guardState.watch = namecallWatch
+else
+    guardState = {watch = namecallWatch}
+    genv.__pistonwareNamecallGuard = guardState
+
+    local getnamecallmethod = getnamecallmethod
+    local mt = getrawmetatable(game)
+    setreadonly(mt, false)
+    local oldNamecall = mt.__namecall
+    mt.__namecall = function(self, ...)
+        local method = getnamecallmethod()
+        if method == "GetPrimaryPartCFrame" and self and self:IsA("Model") then
+            local pp = self.PrimaryPart
+                or self:FindFirstChild("HumanoidRootPart")
+                or self:FindFirstChildWhichIsA("BasePart")
+            if pp then
+                return pp.CFrame
+            else
+                return CFrame.new()
+            end
         end
-    end
-    local entry = namecallWatch[self]
-    if entry then
-        local handler = entry[method]
-        if handler == true then
-            return
-        elseif handler then
-            local ok, blocked = pcall(handler, self, ...)
-            if ok and blocked then return end
+        local entry = guardState.watch[self]
+        if entry then
+            local handler = entry[method]
+            if handler == true then
+                return
+            elseif handler then
+                local ok, blocked = pcall(handler, self, ...)
+                if ok and blocked then return end
+            end
         end
+        return oldNamecall(self, ...)
     end
-    return oldNamecall(self, ...)
+    setreadonly(mt, true)
 end
-setreadonly(mt, true)
 
 local blankFunction = function(...) return ... end
 
@@ -836,15 +854,53 @@ local function entryMatches(objName, list)
     return false
 end
 
+-- Where each proto came from, so a caller that gets a useless proto can go back and
+-- scan the parent's other protos. Weak keys: a proto we never end up using is garbage.
+local protoSource = setmetatable({}, {__mode = 'k'})
+
+-- Returning nil here used to make the caller's table entry VANISH (a nil value in a
+-- table constructor stores no key), so a failed grab produced no error and no warning
+-- -- the remote was just silently missing forever. Hand back an empty stub instead:
+-- it carries no constants, so the remote loop reports it by name like any other miss,
+-- and protoSource still records the parent so the fallback scan can try to recover.
+local function stubProto(func, index)
+    local stub = function() end
+    protoSource[stub] = {func, index}
+    return stub
+end
+
+-- debug.getproto has two shapes across executors:
+--   getproto(f, i)       -> the prototype itself, as a non-callable closure
+--   getproto(f, i, true) -> a table of that prototype's *active* closures
+-- Some only implement the second, and some return nil (rather than erroring) for an
+-- out-of-range index -- in which case the old `if success then return proto` handed
+-- back nil as a success. Try both shapes and only accept an actual function.
 local function safeGetProto(func, index)
-    if not func then return nil end
-    local success, proto = pcall(debug.getproto, func, index)
-    if success then
-        return proto
-    else
-        warn("function:", func, "index:", index) 
-        return nil
+    if type(func) ~= 'function' then return stubProto(func, index) end
+    if type(debug) ~= 'table' or type(debug.getproto) ~= 'function' then
+        return stubProto(func, index)
     end
+
+    local ok, proto = pcall(debug.getproto, func, index)
+    if ok and type(proto) == 'function' then
+        protoSource[proto] = {func, index}
+        return proto
+    end
+
+    local activeOk, active = pcall(debug.getproto, func, index, true)
+    if activeOk and type(active) == 'table' and type(active[1]) == 'function' then
+        protoSource[active[1]] = {func, index}
+        return active[1]
+    end
+
+    return stubProto(func, index)
+end
+
+local function getConstants(func)
+    if type(func) ~= 'function' then return nil end
+    local ok, consts = pcall(debug.getconstants, func)
+    if ok and type(consts) == 'table' then return consts end
+    return nil
 end
 
 -- pistonware funcs
@@ -971,19 +1027,76 @@ run(function()
 		WarlockTarget = safeGetProto(Knit.Controllers.WarlockStaffController.KnitStart, 2)
 	}
 
+	-- Methods you reach a remote through. Luau interns each unique constant once, in
+	-- first-use order, so `default.Client:Get("AimCannon")` lays down "Client", "Get",
+	-- "AimCannon" -- and the old `tab[ind + 1]` returned "Get". When "Get" happens to
+	-- have been interned earlier in the same proto the name DOES land right after
+	-- "Client", which is why this worked for some remotes and not others. Skip over
+	-- accessors instead of assuming either layout.
+	local clientAccessors = {Get = true, WaitFor = true, GetAsync = true, OnEvent = true}
+
 	local function dumpRemote(tab)
-		local ind
-		for i, v in tab do
-			if v == 'Client' then
-				ind = i
+		if type(tab) ~= 'table' then return '' end
+		-- getconstants can come back with holes (a nil constant), and pairs order is
+		-- not index order, so walk a real 1..n range rather than iterating the table
+		local n = 0
+		for k in pairs(tab) do
+			if type(k) == 'number' and k > n then n = k end
+		end
+		local clientAt
+		for i = 1, n do
+			if tab[i] == 'Client' then
+				clientAt = i
 				break
 			end
 		end
-		return ind and tab[ind + 1] or ''
+		if not clientAt then return '' end
+		for i = clientAt + 1, n do
+			local v = tab[i]
+			if type(v) == 'string' and v ~= '' and not clientAccessors[v] then
+				return v
+			end
+		end
+		return ''
+	end
+
+	-- The hardcoded proto indices above are only valid for the game build they were
+	-- written against: adding or removing one closure anywhere earlier in the parent
+	-- shifts every index after it, and we then read constants off an unrelated closure.
+	-- That -- not a missing debug library -- is the usual cause of "Failed to grab
+	-- remote (X)" after a bedwars update. Scan the parent's other protos for one that
+	-- actually references Client, two levels deep since several entries above are
+	-- already nested safeGetProto calls.
+	local function scanProtos(func, skipIndex, depth)
+		if type(func) ~= 'function' or (depth or 0) > 2 then return '' end
+		for i = 1, 64 do
+			local ok, child = pcall(debug.getproto, func, i)
+			if not ok or type(child) ~= 'function' then break end
+			if i ~= skipIndex then
+				local found = dumpRemote(getConstants(child))
+				if found ~= '' then return found end
+			end
+			local nested = scanProtos(child, nil, (depth or 0) + 1)
+			if nested ~= '' then return nested end
+		end
+		return ''
 	end
 
 	for i, v in remoteNames do
-		local remote = dumpRemote(debug.getconstants(v))
+		local remote = dumpRemote(getConstants(v))
+
+		if remote == '' then
+			-- recorded index gave us the wrong closure (or none) -- try its siblings
+			local src = protoSource[v]
+			if src then
+				remote = scanProtos(src[1], src[2])
+			end
+		end
+		if remote == '' then
+			-- or the remote call sits in a closure nested inside what we were handed
+			remote = scanProtos(v)
+		end
+
 		if remote == '' then
 			notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
 		end
@@ -1577,104 +1690,6 @@ run(function()
 		Name = 'Use killaura target'
 	})
 	StrafeIncrease = AimAssist:CreateToggle({Name = 'Strafe increase'})
-end)
-	
-run(function()
-	local AutoClicker
-	local CPS
-	local BlockCPS = {}
-	local Thread
-
-	local function stopClicking()
-		if Thread then
-			task.cancel(Thread)
-			Thread = nil
-		end
-	end
-
-	local function AutoClick()
-		stopClicking()
-
-		Thread = task.delay(1 / 7, function()
-			repeat
-				if not bedwars.AppController:isLayerOpen(bedwars.UILayers.MAIN) then
-					local blockPlacer = bedwars.BlockPlacementController.blockPlacer
-					if store.hand.toolType == 'block' and blockPlacer then
-						if (workspace:GetServerTimeNow() - bedwars.BlockCpsController.lastPlaceTimestamp) >= ((1 / 12) * 0.5) then
-							local mouseinfo = blockPlacer.clientManager:getBlockSelector():getMouseInfo(0)
-							if mouseinfo and mouseinfo.placementPosition == mouseinfo.placementPosition then
-								task.spawn(blockPlacer.placeBlock, blockPlacer, mouseinfo.placementPosition)
-							end
-						end
-					elseif store.hand.toolType == 'sword' then
-						bedwars.SwordController:swingSwordAtMouse(0.39)
-					end
-				end
-	
-				task.wait(1 / (store.hand.toolType == 'block' and BlockCPS or CPS).GetRandomValue())
-			until not AutoClicker.Enabled
-		end)
-	end
-	
-	AutoClicker = vape.Categories.Combat:CreateModule({
-		Name = 'AutoClicker',
-		Function = function(callback)
-			if callback then
-				AutoClicker:Clean(inputService.InputBegan:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then
-						AutoClick()
-					end
-				end))
-	
-				AutoClicker:Clean(inputService.InputEnded:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 and Thread then
-						stopClicking()
-					end
-				end))
-	
-				if inputService.TouchEnabled then
-					for _, v in { '2', '5' } do
-						pcall(function()
-							AutoClicker:Clean(lplr.PlayerGui.MobileUI[v].MouseButton1Down:Connect(AutoClick))
-							AutoClicker:Clean(lplr.PlayerGui.MobileUI[v].MouseButton1Up:Connect(function()
-								stopClicking()
-							end))
-						end)
-					end
-				end
-			else
-				if Thread then
-					task.cancel(Thread)
-					Thread = nil
-				end
-			end
-		end,
-		Tooltip = 'Hold attack button to automatically click'
-	})
-	CPS = AutoClicker:CreateTwoSlider({
-		Name = 'CPS',
-		Min = 1,
-		Max = 9,
-		DefaultMin = 7,
-		DefaultMax = 7
-	})
-	AutoClicker:CreateToggle({
-		Name = 'Place Blocks',
-		Default = true,
-		Function = function(callback)
-			if BlockCPS.Object then
-				BlockCPS.Object.Visible = callback
-			end
-		end
-	})
-	BlockCPS = AutoClicker:CreateTwoSlider({
-		Name = 'Block CPS',
-		Min = 1,
-		Max = 12,
-		DefaultMin = 12,
-		DefaultMax = 12,
-		Darker = true
-	})
 end)
 	
 run(function()
@@ -2336,166 +2351,6 @@ run(function()
 			end
 		end,
 		Tooltip = 'Prevents slowing down when using items.'
-	})
-end)
-
-run(function()
-	local TargetPart
-	local Targets
-	local FOV
-	local OtherProjectiles
-	local Blacklist
-	local rayCheck = RaycastParams.new()
-	rayCheck.FilterType = Enum.RaycastFilterType.Include
-	rayCheck.FilterDescendantsInstances = {workspace:FindFirstChild('Map')}
-	local old
-	local oldBlockKicker
-
-	-- Ignore decoy/NPC models named "Falcon" (e.g. workspace["Falcon-1"]).
-	-- A real player named Falcon still has a backing Player object AND a valid
-	-- (hyphen-free) username, so gating on "no Player" only skips fake models
-	-- while never sparing an actual person called Falcon.
-	local function isFalconDecoy(ent)
-		if not ent or ent.Player then return false end
-		local name = ent.Character and ent.Character.Name
-		return name ~= nil and (name == 'Falcon' or name:match('^Falcon%-') ~= nil)
-	end
-
-	-- Same blacklist system as ProjectileAura: case-insensitive substring match of
-	-- the projectile type against each enabled "Blacklist Items" entry (e.g. telepearl).
-	local function isBlacklisted(projName)
-		if type(projName) ~= "string" or not Blacklist then return false end
-		local lower = projName:lower()
-		for _, name in ipairs(Blacklist.ListEnabled) do
-			if lower:find(name:lower()) then return true end
-		end
-		return false
-	end
-
-	local ProjectileAimbot = vape.Categories.Blatant:CreateModule({
-		Name = 'ProjectileAimbot',
-		Function = function(callback)
-			if callback then
-				old = bedwars.ProjectileController.calculateImportantLaunchValues
-				bedwars.ProjectileController.calculateImportantLaunchValues = function(...)
-					local self, projmeta, worldmeta, origin, shootpos = ...
-					if isBlacklisted(projmeta.projectile) then return old(...) end
-					local plr = entitylib.EntityMouse({
-						Part = 'RootPart',
-						Range = FOV.Value,
-						Players = Targets.Players.Enabled,
-						NPCs = Targets.NPCs.Enabled,
-						Wallcheck = Targets.Walls.Enabled,
-						Origin = entitylib.isAlive and (shootpos or entitylib.character.RootPart.Position) or Vector3.zero
-					})
-	
-					if plr then
-						if isFalconDecoy(plr) then return old(...) end
-						local pos = shootpos or self:getLaunchPosition(origin)
-						if not pos then
-							return old(...)
-						end
-	
-						if (not OtherProjectiles.Enabled) and not projmeta.projectile:find('arrow') then
-							return old(...)
-						end
-	
-						local meta = projmeta:getProjectileMeta()
-						local lifetime = (worldmeta and meta.predictionLifetimeSec or meta.lifetimeSec or 3)
-						local gravity = (meta.gravitationalAcceleration or 196.2) * projmeta.gravityMultiplier
-						local projSpeed = (meta.launchVelocity or 100)
-						local offsetpos = pos + (projmeta.projectile == 'owl_projectile' and Vector3.zero or projmeta.fromPositionOffset)
-						local balloons = plr.Character:GetAttribute('InflatedBalloons')
-						local playerGravity = workspace.Gravity
-	
-						if balloons and balloons > 0 then
-							playerGravity = (workspace.Gravity * (1 - ((balloons >= 4 and 1.2 or balloons >= 3 and 1 or 0.975))))
-						end
-	
-						if plr.Character.PrimaryPart:FindFirstChild('rbxassetid://8200754399') then
-							playerGravity = 6
-						end
-	
-						if plr.Player:GetAttribute('IsOwlTarget') then
-							for _, owl in collectionService:GetTagged('Owl') do
-								if owl:GetAttribute('Target') == plr.Player.UserId and owl:GetAttribute('Status') == 2 then
-									playerGravity = 0
-								end
-							end
-						end
-	
-						local newlook = CFrame.new(offsetpos, plr[TargetPart.Value].Position) * CFrame.new(projmeta.projectile == 'owl_projectile' and Vector3.zero or Vector3.new(bedwars.BowConstantsTable.RelX, bedwars.BowConstantsTable.RelY, bedwars.BowConstantsTable.RelZ))
-						local calc = prediction.SolveTrajectory(newlook.p, projSpeed, gravity, plr[TargetPart.Value].Position, projmeta.projectile == 'telepearl' and Vector3.zero or plr[TargetPart.Value].Velocity, playerGravity, plr.HipHeight, plr.Jumping and 42.6 or nil, rayCheck)
-						if calc then
-							targetinfo.Targets[plr] = tick() + 1
-							return {
-								initialVelocity = CFrame.new(newlook.Position, calc).LookVector * projSpeed,
-								positionFrom = offsetpos,
-								deltaT = lifetime,
-								gravitationalAcceleration = gravity,
-								drawDurationSeconds = 5
-							}
-						end
-					end
-	
-					return old(...)
-				end
-
-				oldBlockKicker = bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition
-				bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = function(...)
-					if not OtherProjectiles.Enabled then return oldBlockKicker(...) end
-					local origin, dir = select(2, ...)
-					local plr = entitylib.EntityMouse({
-						Part = 'RootPart',
-						Range = FOV.Value,
-						Origin = origin,
-						Players = Targets.Players.Enabled,
-						NPCs = Targets.NPCs.Enabled,
-						Wallcheck = Targets.Walls.Enabled
-					})
-
-					if plr then
-						local calc = prediction.SolveTrajectory(origin, 100, 20, plr.RootPart.Position, plr.RootPart.Velocity, workspace.Gravity, plr.HipHeight, plr.Jumping and 42.6 or nil, rayCheck)
-
-						if calc then
-							for i, v in debug.getstack(2) do
-								if v == dir then
-									debug.setstack(2, i, CFrame.lookAt(origin, calc).LookVector)
-								end
-							end
-						end
-					end
-
-					return oldBlockKicker(...)
-				end
-			else
-				bedwars.ProjectileController.calculateImportantLaunchValues = old
-				bedwars.BlockKickerKitController.getKickBlockProjectileOriginPosition = oldBlockKicker
-			end
-		end,
-		Tooltip = 'Silently adjusts your aim towards the enemy'
-	})
-	Targets = ProjectileAimbot:CreateTargets({
-		Players = true,
-		Walls = true
-	})
-	TargetPart = ProjectileAimbot:CreateDropdown({
-		Name = 'Part',
-		List = {'RootPart', 'Head'}
-	})
-	FOV = ProjectileAimbot:CreateSlider({
-		Name = 'FOV',
-		Min = 1,
-		Max = 1000,
-		Default = 1000
-	})
-	OtherProjectiles = ProjectileAimbot:CreateToggle({
-		Name = 'Other Projectiles',
-		Default = true
-	})
-	Blacklist = ProjectileAimbot:CreateTextList({
-		Name = 'Blacklist Items',
-		Default = {'telepearl'}
 	})
 end)
 	
@@ -7492,7 +7347,7 @@ run(function()
 		Name = 'Effects',
 		List = WinEffectName
 	})
-end)																																																																																	
+end)
 
 -- == bedwars module loader ==
 -- Exposes shared.bedwars and loads the external obfuscatable module
