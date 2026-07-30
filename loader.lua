@@ -7,6 +7,11 @@ end
 local cloneref = cloneref or function(ref)
 	return ref
 end
+local delfile = delfile or function(file)
+	writefile(file, '')
+end
+
+local Watermark = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.'
 
 local function downloadFile(path, func)
 	if not isfile(path) then
@@ -36,7 +41,7 @@ local function downloadFile(path, func)
 			error('failed to download '..path..' after 4 attempts')
 		end
 		if path:find('.lua') then
-			content = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..content
+			content = Watermark..'\n'..content
 		end
 		writefile(path, content)
 	end
@@ -119,6 +124,116 @@ local function fetchProfilesCommit()
 	end)
 	if not (bodySuc and body and typeof(body) == 'table' and body[1] and body[1].sha) then return nil end
 	return body[1].sha
+end
+
+-- Keeps every cached .lua file current against the GitHub repo, using git blob shas.
+-- One trees API call returns the content sha of EVERY file in the repo, so this costs two
+-- API requests per session no matter how many files exist (a per-file commits lookup would
+-- be one request each and die on GitHub's 60/hour unauthenticated limit).
+-- pistonware/filecheck.json remembers the sha each cached file was last downloaded at; any
+-- mismatch is re-downloaded pinned to the head commit (branch raw URLs can serve stale CDN
+-- content for a few minutes after a push, commit-pinned ones cannot). Files whose watermark
+-- line was removed are developer-owned and never touched -- exactly what the watermark has
+-- always promised. games/bedwars.lua lives on Codeberg, not in this tree, and keeps its own
+-- bedwarscheck.txt system.
+local function updateCachedFiles(onProgress)
+	local httpService = cloneref(game:GetService('HttpService'))
+
+	local headSuc, headSha = pcall(function()
+		return httpService:JSONDecode(game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?sha=main&per_page=1', true))[1].sha
+	end)
+	if not (headSuc and type(headSha) == 'string') then return end
+
+	local treeSuc, tree = pcall(function()
+		return httpService:JSONDecode(game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/git/trees/'..headSha..'?recursive=1', true))
+	end)
+	if not (treeSuc and type(tree) == 'table' and type(tree.tree) == 'table') then return end
+
+	local manifest = {}
+	pcall(function()
+		if isfile('pistonware/filecheck.json') then
+			local decoded = httpService:JSONDecode(readfile('pistonware/filecheck.json'))
+			if type(decoded) == 'table' then
+				manifest = decoded
+			end
+		end
+	end)
+
+	local remote = {}
+	for _, v in tree.tree do
+		if v.type == 'blob' and v.path:sub(-4) == '.lua' then
+			remote[v.path] = v.sha
+		end
+	end
+
+	-- Only files already cached get refreshed here -- everything else keeps downloading on
+	-- demand, and is picked up by this pass on the session after it first appears.
+	local toUpdate = {}
+	for path, sha in remote do
+		local localPath = 'pistonware/'..path
+		if manifest[path] ~= sha and isfile(localPath) and readfile(localPath):sub(1, #Watermark) == Watermark then
+			table.insert(toUpdate, path)
+		end
+	end
+
+	local changed = false
+
+	-- Files deleted from the repo: drop the cached copy too, so a removed gui/game can't keep
+	-- loading from cache forever. Skipped if GitHub reports the tree listing as incomplete,
+	-- since a missing entry would be indistinguishable from a deleted file.
+	if not tree.truncated then
+		for path in manifest do
+			if not remote[path] then
+				pcall(function()
+					local localPath = 'pistonware/'..path
+					if isfile(localPath) and readfile(localPath):sub(1, #Watermark) == Watermark then
+						delfile(localPath)
+					end
+				end)
+				manifest[path] = nil
+				changed = true
+			end
+		end
+	end
+
+	local completed, pending, total = 0, #toUpdate, #toUpdate
+	if total > 0 then
+		local done = Instance.new('BindableEvent')
+		for _, path in toUpdate do
+			task.spawn(function()
+				for attempt = 1, 4 do
+					local suc, res = pcall(function()
+						return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..headSha..'/'..select(1, path:gsub(' ', '%%20')), true)
+					end)
+					if suc and res and res ~= '' and res ~= '404: Not Found' then
+						pcall(writefile, 'pistonware/'..path, Watermark..'\n'..res)
+						manifest[path] = remote[path]
+						changed = true
+						break
+					end
+					if attempt < 4 then
+						task.wait(attempt)
+					end
+				end
+				completed += 1
+				pending -= 1
+				if onProgress then
+					onProgress(completed, total)
+				end
+				if pending <= 0 then
+					done:Fire()
+				end
+			end)
+		end
+		if pending > 0 then
+			done.Event:Wait()
+		end
+		done:Destroy()
+	end
+
+	if changed then
+		pcall(writefile, 'pistonware/filecheck.json', httpService:JSONEncode(manifest))
+	end
 end
 
 --[[
@@ -745,6 +860,21 @@ do
 	console:SetProgress(0.4)
 end
 if console:IsAborted() then deleteInstall() return end
+
+-- Step 1b: bring every cached .lua file up to date BEFORE any of it runs. Skipped on
+-- reloads (the first manual run this session already did it, and reinjects should stay
+-- fast) and for developers (running local edits is the whole point of developer mode --
+-- and their watermark-stripped files would be skipped anyway).
+if not isReload and not shared.PistonwareDeveloper then
+	console:SetLine('Checking for updates...')
+	pcall(updateCachedFiles, function(completed, total)
+		console:SetLine('Updating files ('..completed..'/'..total..')...')
+		console:SetProgress(0.4 + 0.06 * (completed / math.max(total, 1)))
+	end)
+	console:SetLine('')
+	if console:IsAborted() then deleteInstall() return end
+end
+console:SetProgress(0.46)
 
 -- Detect the very first run (empty/near-empty profiles folder) BEFORE downloading, so we
 -- know afterwards whether to show the prompts below.
