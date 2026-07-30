@@ -76,7 +76,7 @@ local getcustomassets = {
 	['pistonware/assets/old/textv4.png'] = 'rbxasset://textv4.png',
 	['pistonware/assets/old/textvape.png'] = 'rbxasset://textvape.png',
 	['pistonware/assets/old/utilityicon.png'] = 'rbxasset://utilityicon.png',
-	['pistonware/assets/old/vape.png'] = 'rbxassetid://81301309131852',
+	['pistonware/assets/old/vape.png'] = 'rbxassetid://99295797606112',
 	['pistonware/assets/old/worldicon.png'] = 'rbxasset://worldicon.png'
 }
 
