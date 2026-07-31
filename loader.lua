@@ -27,17 +27,18 @@ local Watermark = '--This watermark is used to delete the file if its cached, re
 
 local function downloadFile(path, func)
 	if not isfile(path) then
-		-- games/bedwars.lua only exists in the Codeberg repo (kept private/obfuscated there);
-		-- everything else now lives in the GitHub repo.
+		-- bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
+		-- repo's ROOT even though it caches locally under games/; everything else lives in the
+		-- GitHub repo.
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
-		-- Retried a few times: raw file hosts intermittently 504 (~5% observed on Codeberg's),
-		-- returning an empty body that would otherwise get cached as a corrupt/empty file.
+		-- Retried a few times: raw file hosts intermittently fail, returning an empty body that
+		-- would otherwise get cached as a corrupt/empty file.
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
 				if isBedwars then
-					return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+					return game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
 				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
@@ -149,7 +150,7 @@ end
 -- mismatch is re-downloaded pinned to the head commit (branch raw URLs can serve stale CDN
 -- content for a few minutes after a push, commit-pinned ones cannot). Files whose watermark
 -- line was removed are developer-owned and never touched -- exactly what the watermark has
--- always promised. games/bedwars.lua lives on Codeberg, not in this tree, and keeps its own
+-- always promised. bedwars.lua lives on GitLab, not in this tree, and keeps its own
 -- bedwarscheck.txt system.
 local function updateCachedFiles(onProgress)
 	local httpService = cloneref(game:GetService('HttpService'))
