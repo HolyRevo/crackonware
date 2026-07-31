@@ -7332,28 +7332,30 @@ shared.bedwars = {
     namecallGuard       = namecallGuard,
 }
 
--- bedwars.lua is the ONLY file fetched from Codeberg -- everything else comes from GitHub.
--- It auto-updates: the sha of the latest commit that touched games/bedwars.lua is tracked in
--- bedwarscheck.txt; whenever Codeberg reports a newer commit, the file is silently
--- re-downloaded (no prompt) and the sha re-recorded.
+-- bedwars.lua is the ONLY file fetched from GitLab -- everything else comes from GitHub.
+-- Note it sits at the REPO ROOT there (gitlab.com/pistonware/pistonware/bedwars.lua), even
+-- though it is cached locally under pistonware/games/. It auto-updates: the sha of the latest
+-- commit that touched it is tracked in bedwarscheck.txt; whenever GitLab reports a newer
+-- commit, the file is silently re-downloaded (no prompt) and the sha re-recorded.
 
--- Latest commit sha that touched games/bedwars.lua on Codeberg, or nil on failure.
+-- Latest commit sha that touched bedwars.lua on GitLab, or nil on failure.
+-- GitLab's commits API names the sha field 'id' (GitHub/Codeberg call it 'sha').
 local function fetchBedwarsCommit()
     local suc, res = pcall(function()
-        return game:HttpGet('https://codeberg.org/api/v1/repos/pistonware/pistonware/commits?path=games/bedwars.lua&limit=1&sha=main', true)
+        return game:HttpGet('https://gitlab.com/api/v4/projects/pistonware%2Fpistonware/repository/commits?path=bedwars.lua&ref_name=main&per_page=1', true)
     end)
     if not (suc and res and res ~= '' and res ~= '404: Not Found') then return nil end
     local dsuc, body = pcall(function()
         return httpService:JSONDecode(res)
     end)
-    if not (dsuc and type(body) == 'table' and body[1] and body[1].sha) then return nil end
-    return body[1].sha
+    if not (dsuc and type(body) == 'table' and body[1] and body[1].id) then return nil end
+    return body[1].id
 end
 
--- Returns the bedwars.lua source, auto-updating from Codeberg when a newer commit exists.
--- Codeberg's raw endpoint intermittently 504s with an empty body (worse here since this file
--- is large), hence the retries; the download is pinned to the exact commit sha so a fetch
--- right after a push can't grab a stale CDN copy of the branch head.
+-- Returns the bedwars.lua source, auto-updating from GitLab when a newer commit exists.
+-- Raw file hosts intermittently fail (Codeberg, which this replaced, served empty-bodied
+-- 504s and eventually a full outage), hence the retries; the download is pinned to the exact
+-- commit sha so a fetch right after a push can't grab a stale CDN copy of the branch head.
 local function downloadBedwars()
     local path = 'pistonware/games/bedwars.lua'
     local checkPath = 'pistonware/games/bedwarscheck.txt'
@@ -7380,8 +7382,8 @@ local function downloadBedwars()
     for attempt = 1, 4 do
         local suc, res = pcall(function()
             local url = latest
-                and ('https://codeberg.org/pistonware/pistonware/raw/commit/'..latest..'/games/bedwars.lua')
-                or 'https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua'
+                and ('https://gitlab.com/pistonware/pistonware/-/raw/'..latest..'/bedwars.lua')
+                or 'https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua'
             return game:HttpGet(url, true)
         end)
         -- loadstring compile check: during a host outage HttpGet can hand back the 503/error
