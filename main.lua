@@ -38,7 +38,10 @@ local function downloadFile(path, func)
 				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
-			if suc and res and res ~= '' and res ~= '404: Not Found' then
+			-- For .lua files, a compile check too: an outage can hand back the 503/error page
+			-- as the body, and caching that would poison the install silently (cache-first
+			-- means it would never be refetched).
+			if suc and res and res ~= '' and res ~= '404: Not Found' and (not path:find('.lua') or loadstring(res) ~= nil) then
 				content = res
 				break
 			end
