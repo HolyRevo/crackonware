@@ -1248,8 +1248,7 @@ components = {
 				objecttitle.Parent = object
 				if optionsettings.Profiles then
 					object.MouseButton1Click:Connect(function()
-						mainapi:Save(v.Name)
-						mainapi:Load(true)
+						mainapi:SetProfile(v.Name)
 					end)
 					object.MouseButton2Click:Connect(function()
 						if v.Name ~= mainapi.Profile then
@@ -2457,6 +2456,26 @@ function mainapi:Save(newprofile)
 
 	writefile('pistonware/profiles/'..game.GameId..'.gui.txt', httpService:JSONEncode(guidata))
 	writefile('pistonware/profiles/'..self.Profile..self.Place..'.txt', httpService:JSONEncode(savedata))
+end
+
+-- Switch the active profile. Save(name) snapshots the outgoing profile's modules and
+-- stamps the new name into <GameId>.gui.txt -- but Save gets replaced with a no-op
+-- around config syncs, and Load(true) reads the active profile back OUT of gui.txt:
+-- with Save dead, a switch would silently re-load the OLD profile and snap back.
+-- Writing the name into gui.txt directly as well makes the switch stick no matter
+-- what state Save is in (a plain re-write of the same value when Save worked).
+function mainapi:SetProfile(name)
+	pcall(function() self:Save(name) end)
+	pcall(function()
+		local guipath = 'pistonware/profiles/'..game.GameId..'.gui.txt'
+		local guidata = isfile(guipath) and loadJson(guipath)
+		if type(guidata) ~= 'table' then return end
+		if guidata.Profile ~= name then
+			guidata.Profile = name
+			writefile(guipath, httpService:JSONEncode(guidata))
+		end
+	end)
+	self:Load(true)
 end
 
 function mainapi:SaveOptions(object, savedoptions)
@@ -3735,8 +3754,7 @@ mainapi:Clean(inputService.InputBegan:Connect(function(inputObj)
 
 		for _, v in mainapi.Profiles do
 			if checkKeybinds(mainapi.HeldKeybinds, v.Bind, inputObj.KeyCode.Name) and v.Name ~= mainapi.Profile then
-				mainapi:Save(v.Name)
-				mainapi:Load(true)
+				mainapi:SetProfile(v.Name)
 				break
 			end
 		end
