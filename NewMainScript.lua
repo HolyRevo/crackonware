@@ -10,17 +10,18 @@ end
 
 local function downloadFile(path, func)
 	if not isfile(path) then
-		-- games/bedwars.lua only exists in the Codeberg repo (kept private/obfuscated there);
-		-- everything else now lives in the GitHub repo.
+		-- bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
+		-- repo's ROOT even though it caches locally under games/; everything else lives in the
+		-- GitHub repo.
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
-		-- Retried a few times: raw file hosts intermittently 504 (~5% observed on Codeberg's),
-		-- returning an empty body that would otherwise get cached as a corrupt/empty file.
+		-- Retried a few times: raw file hosts intermittently fail, returning an empty body that
+		-- would otherwise get cached as a corrupt/empty file.
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
 				if isBedwars then
-					return game:HttpGet('https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua', true)
+					return game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
 				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
