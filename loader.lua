@@ -1011,11 +1011,17 @@ console:SetProgress(0.73)
 -- straight into vape:Load as the profile to load, replacing the 'default' profile. The keys
 -- match the profile file name prefixes (e.g. blatant<PlaceId>.txt) so Load can find the file.
 if downloadedConfigs then
+	-- No fallback: only an explicit button click may force a config. This used to
+	-- default to 'blatant' -- on a timeout (user tabbed away for 120s) or on the
+	-- headless console (which answers every Ask with the fallback instantly) that
+	-- silently stamped 'blatant' into shared.VapeCustomProfile, overriding the
+	-- profile saved in gui.txt without the user ever choosing it. With nil the
+	-- type(choice) guard below skips the override and the saved profile decides.
 	local ok, choice = pcall(function()
 		return console:Ask('Which config would you like to load by default?', {
 			{text = 'Blatant', key = 'blatant'},
 			{text = 'Legit', key = 'legit'}
-		}, 120, 'blatant')
+		}, 120, nil)
 	end)
 	if console:IsAborted() then deleteInstall() return end
 	if ok and type(choice) == 'string' then
