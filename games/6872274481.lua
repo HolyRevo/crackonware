@@ -7384,7 +7384,10 @@ local function downloadBedwars()
                 or 'https://codeberg.org/pistonware/pistonware/raw/branch/main/games/bedwars.lua'
             return game:HttpGet(url, true)
         end)
-        if suc and res and res ~= '' and res ~= '404: Not Found' then
+        -- loadstring compile check: during a host outage HttpGet can hand back the 503/error
+        -- page as the body, which the ~=''/'404' checks accept -- caching that poisons the
+        -- install silently forever (cache-first means it would never be refetched).
+        if suc and res and res ~= '' and res ~= '404: Not Found' and loadstring(res) ~= nil then
             pcall(writefile, path, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
             if latest then
                 pcall(writefile, checkPath, latest)
@@ -7403,5 +7406,33 @@ end
 
 local bedwarsSource = downloadBedwars()
 if bedwarsSource then
-    loadstring(bedwarsSource)()
+    local bedwarsFn = loadstring(bedwarsSource)
+    if bedwarsFn then
+        local ok, err = pcall(bedwarsFn)
+        if not ok then
+            warn('[pistonware] bedwars.lua errored while running: '..tostring(err))
+        end
+    else
+        -- Doesn't compile: the cached copy is corrupt (a truncated write, or an error page
+        -- cached by an older loader). Delete it so the next session redownloads instead of
+        -- failing silently forever.
+        warn('[pistonware] cached bedwars.lua is corrupt, deleting it -- rejoin to redownload')
+        pcall(function()
+            if delfile then
+                delfile('pistonware/games/bedwars.lua')
+            else
+                writefile('pistonware/games/bedwars.lua', '')
+            end
+        end)
+        pcall(function()
+            vape:CreateNotification('Vape', 'Cached bedwars.lua was corrupt and has been removed -- rejoin the game to redownload it.', 30, 'alert')
+        end)
+    end
+else
+    -- Every attempt failed and there is no usable cache (fresh install during a host
+    -- outage). Say so instead of silently loading without combat modules.
+    warn('[pistonware] bedwars.lua could not be downloaded -- the file host may be down')
+    pcall(function()
+        vape:CreateNotification('Vape', 'Could not download bedwars.lua -- the file host may be down. Combat modules are unavailable; rejoin the game to retry.', 30, 'alert')
+    end)
 end
