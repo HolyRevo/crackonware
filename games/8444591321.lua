@@ -22,9 +22,9 @@ local cached = isfile(gamePath) and readfile(gamePath) or nil
 if cached and cached:gsub('%s', '') ~= '' then
 	loadstring(cached, '6872274481')()
 elseif not shared.PistonwareDeveloper then
-	-- Fetched from GitHub, not Codeberg: only games/bedwars.lua still lives on Codeberg,
-	-- and its stale copy of this file was being downloaded twice (once to probe for
-	-- existence, then again to save it).
+	-- Fetched from GitHub: only bedwars.lua lives off-repo (on GitLab), and the old host's
+	-- stale copy of this file was being downloaded twice (once to probe for existence, then
+	-- again to save it).
 	local content
 	for attempt = 1, 4 do
 		local suc, res = pcall(function()
