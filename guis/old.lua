@@ -3659,6 +3659,28 @@ local function downloadProfileFile(path, commit)
 		end
 	end
 	if not content then return false end
+	-- <GameId>.gui.txt is the GUI's state file, not a config: besides the theme and window
+	-- layout it holds `Profile` (the equipped config) and `Profiles` (the list shown in the
+	-- Profiles tab, custom ones included). Writing the repo's copy over it wiped every custom
+	-- profile from the list and forced the equipped config back to whatever shipped. Merge so
+	-- the theme still syncs but those two fields stay local -- only shipped configs get replaced.
+	if path:find('%.gui%.txt$') then
+		local ok, merged = pcall(function()
+			local new = httpService:JSONDecode(content)
+			if type(new) ~= 'table' then return content end
+			if isfile(path) then
+				local old = httpService:JSONDecode(readfile(path))
+				if type(old) == 'table' then
+					if old.Profiles ~= nil then new.Profiles = old.Profiles end
+					if old.Profile ~= nil then new.Profile = old.Profile end
+				end
+			end
+			return httpService:JSONEncode(new)
+		end)
+		if ok and type(merged) == 'string' then
+			content = merged
+		end
+	end
 	return (pcall(writefile, path, content))
 end
 
