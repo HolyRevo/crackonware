@@ -78,6 +78,31 @@ local function fetchProfilesListing(ref)
 	return body
 end
 
+-- <GameId>.gui.txt is not a config -- it is the GUI's state file, and alongside the theme and
+-- window layout it stores `Profile` (which config is equipped) and `Profiles` (the list the
+-- Profiles tab shows, including ones the user made). Overwriting it wholesale during a sync
+-- therefore deleted every custom profile from the list and snapped the equipped config back to
+-- whatever the repo shipped. Merged instead: the repo supplies the theme/layout, the local file
+-- keeps those two fields, so only the shipped configs are ever actually replaced.
+local function mergeGuiState(path, incoming)
+	if not path:find('%.gui%.txt$') then return incoming end
+	local ok, merged = pcall(function()
+		local httpService = cloneref(game:GetService('HttpService'))
+		local new = httpService:JSONDecode(incoming)
+		if type(new) ~= 'table' then return incoming end
+		if isfile(path) then
+			local old = httpService:JSONDecode(readfile(path))
+			if type(old) == 'table' then
+				if old.Profiles ~= nil then new.Profiles = old.Profiles end
+				if old.Profile ~= nil then new.Profile = old.Profile end
+			end
+		end
+		return httpService:JSONEncode(new)
+	end)
+	-- unparseable on either side: fall back to writing exactly what the host sent
+	return (ok and type(merged) == 'string') and merged or incoming
+end
+
 -- Downloads every file in a profiles listing concurrently. When `commit` is given, files are
 -- fetched pinned to that exact commit sha and overwritten unconditionally -- branch-path raw
 -- URLs can serve CDN-cached content for up to ~5 minutes after a push, which would make a
@@ -102,7 +127,7 @@ local function downloadProfilesListing(body, commit, onProgress)
 							return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/'..commit..'/'..relPath, true)
 						end)
 						if suc and res and res ~= '' and res ~= '404: Not Found' then
-							writefile('pistonware/'..relPath, res)
+							writefile('pistonware/'..relPath, mergeGuiState('pistonware/'..relPath, res))
 							break
 						end
 						if attempt < 4 then
