@@ -894,7 +894,7 @@ do
 	local lowered = tostring(executorName):lower()
 	for _, name in unsupported do
 		if lowered:find(name, 1, true) then
-			local message = 'Unsupported executor ('..tostring(executorName)..'), please look in the #supported-executors channel in the discord for a list of supported executors'
+			local message = 'Unsupported executor ('..tostring(executorName)..'), please look in the #supported-executors channel for more info.'
 			console:SetStatus('ERROR', '#E15046')
 			console:SetLine(message, Palette.Error)
 			warn('[pistonware] '..message)
