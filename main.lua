@@ -107,20 +107,30 @@ local function prefetchFolder(folder)
 	end
 	if #toFetch <= 0 then return end
 
-	local completed, total = 0, #toFetch
+	local completed, pending, total = 0, #toFetch, #toFetch
 	local done = Instance.new('BindableEvent')
 	updateDownloader('Downloading '..folder..' ('..completed..'/'..total..')')
 	for _, name in toFetch do
 		task.spawn(function()
 			pcall(downloadFile, 'pistonware/'..folder..'/'..name)
 			completed += 1
-			updateDownloader('Downloading '..folder..' ('..completed..'/'..total..')')
-			if completed >= total then
+			pending -= 1
+			-- pcall'd and after the counters: if this ever threw, the task would die
+			-- before releasing the wait below and the boot would hang on a GUI error
+			pcall(updateDownloader, 'Downloading '..folder..' ('..completed..'/'..total..')')
+			if pending <= 0 then
 				done:Fire()
 			end
 		end)
 	end
-	done.Event:Wait()
+	-- Only wait when something is still outstanding. task.spawn runs each task inline
+	-- until it yields, so on executors where HttpGet does NOT yield the scheduler every
+	-- download finishes inside the loop above -- done:Fire() then lands with nothing
+	-- listening yet, and an unconditional Wait() blocks forever with the label frozen at
+	-- total/total. Same guard the loader's downloaders already use.
+	if pending > 0 then
+		done.Event:Wait()
+	end
 	done:Destroy()
 end
 
