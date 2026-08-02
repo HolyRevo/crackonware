@@ -882,6 +882,30 @@ console:SetStatus('INJECTING')
 console:SetLine('Injecting into ROBLOX...')
 console:SetProgress(0.08)
 
+-- Executors known not to run pistonware correctly. Checked before anything is downloaded so
+-- the run stops on the console instead of failing somewhere deep in the GUI. identifyexecutor
+-- is absent on some executors, hence the pcall -- an unknown name is allowed through.
+do
+	local unsupported = {'xeno', 'solara'}
+	local executorName = ''
+	pcall(function()
+		executorName = identifyexecutor and identifyexecutor() or ''
+	end)
+	local lowered = tostring(executorName):lower()
+	for _, name in unsupported do
+		if lowered:find(name, 1, true) then
+			local message = 'Unsupported executor ('..tostring(executorName)..'), please look in the #supported-executors channel in the discord for a list of supported executors'
+			console:SetStatus('ERROR', '#E15046')
+			console:SetLine(message, Palette.Error)
+			warn('[pistonware] '..message)
+			-- released so a later execution on a supported executor is not locked out by the
+			-- duplicate-boot guard at the top of this file
+			shared.PistonwareLoaderBoot = nil
+			return
+		end
+	end
+end
+
 for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pistonware/assets', 'pistonware/libraries', 'pistonware/guis'} do
 	if not isfolder(folder) then
 		makefolder(folder)
