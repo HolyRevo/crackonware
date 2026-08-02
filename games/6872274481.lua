@@ -1114,6 +1114,39 @@ run(function()
 		end
 	end
 
+	-- Walks the block grid from a target cell back toward the player and returns the first
+	-- solid cell standing in the way -- i.e. what someone standing here could actually put a
+	-- tool on. calculatePath calls a cell diggable when ANY of its six faces touches air,
+	-- including the face underneath it or the one on the far side, so its answer on its own
+	-- happily digs a covered bed straight through its cover.
+	--
+	-- Done against the block store rather than with a raycast: blocks render through chunked
+	-- geometry, so a ray reports chunk parts instead of the block the store hands back and
+	-- cannot tell a target apart from whatever covers it.
+	local function frontOf(worldpos)
+		if not entitylib.isAlive then return worldpos end
+		local origin = entitylib.character.RootPart.Position
+		for _ = 1, 12 do
+			local direction = origin - worldpos
+			-- close enough to be the cell we are standing in; nothing left in the way
+			if direction.Magnitude <= 3 then break end
+			local ax, ay, az = math.abs(direction.X), math.abs(direction.Y), math.abs(direction.Z)
+			local step
+			if ax >= ay and ax >= az then
+				step = Vector3.new(direction.X > 0 and 3 or -3, 0, 0)
+			elseif ay >= az then
+				step = Vector3.new(0, direction.Y > 0 and 3 or -3, 0)
+			else
+				step = Vector3.new(0, 0, direction.Z > 0 and 3 or -3)
+			end
+			local nextblock = getPlacedBlock(worldpos + step)
+			-- open air on the way to the player: the current cell is the exposed one
+			if not nextblock or nextblock:GetAttribute('NoBreak') then break end
+			worldpos = worldpos + step
+		end
+		return worldpos
+	end
+
 	bedwars.placeBlock = function(pos, item)
 		if getItem(item) then
 			store.blockPlacer.blockType = item
@@ -1121,18 +1154,25 @@ run(function()
 		end
 	end
 
-	-- blockcheck: dig the blocks covering the target (a bed's contained positions) rather
-	--   than the target itself. nil leaves it on, which is what every existing caller got.
-	-- method: 'Distance' scores candidates by how far the dig spot is from the player;
-	--   anything else keeps the original scoring, fewest hits to get through.
-	-- The scoring matters: picking purely by hit count can settle on a spot on the far side
+	-- blockcheck: when true, walk the chosen dig spot back to whatever physically stands
+	--   between it and the player, so cover comes off first instead of being mined through.
+	--   Anything else (false, or the nil every other caller passes) leaves the original
+	--   behaviour completely alone -- pathfind and dig, cover or no cover.
+	-- method: 'Distance' ranks candidates by how far the dig spot is from the player;
+	--   anything else keeps the original ranking, fewest hits to get through. The ranking
+	--   still decides which cell is aimed at; blockcheck only walks that choice back to
+	--   whatever is physically in front of it.
+	-- autotool: pick the tool by selecting its hotbar slot (what the AutoTool module does)
+	--   instead of equipping it directly. The correct tool is equipped either way -- this
+	--   only decides which route gets used.
+	-- The ranking matters: picking purely by hit count can settle on a spot on the far side
 	-- of the block, and the 30-stud guard below then aborts the break outright.
-	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method)
+	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method, autotool)
 		if lplr:GetAttribute('DenyBlockBreak') or not entitylib.isAlive then return end
 		local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
 		local cost, pos, target, path = math.huge
 		local selfpos = entitylib.character.RootPart.Position
-		local positions = ((blockcheck == nil or blockcheck) and handler and handler:getContainedPositions(block)) or {block.Position / 3}
+		local positions = (handler and handler:getContainedPositions(block)) or {block.Position / 3}
 
 		for _, v in positions do
 			local dpos, dcost, dpath = calculatePath(block, v * 3)
@@ -1141,6 +1181,20 @@ run(function()
 				if score < cost then
 					cost, pos, target, path = score, dpos, v * 3, dpath
 				end
+			end
+		end
+
+		-- Block Check. The spot chosen above is picked by the selected metric, but it can sit
+		-- behind the cover (an air face under the bed, or one on its far side) and hitting it
+		-- there is what reads as mining straight through the blocks. Step back along the line
+		-- to the player and take the first cell actually in the way, so the cover comes off
+		-- first from the side the player is standing on.
+		if blockcheck and pos then
+			local front = frontOf(pos)
+			if front ~= pos then
+				-- path described the old target; drop it so the visualiser stops drawing a
+				-- chain that no longer leads anywhere
+				pos, path = front, nil
 			end
 		end
 
@@ -1153,7 +1207,27 @@ run(function()
 				local breaktype = bedwars.ItemMeta[dblock.Name].block.breakType
 				local tool = store.tools[breaktype]
 				if tool then
-					switchItem(tool.tool)
+					-- autotool: move the hotbar selection onto the tool the way the AutoTool
+					-- module does it -- an InventorySelectHotbarSlot dispatch, i.e. the same
+					-- path as pressing the number key -- so the swap happens through the
+					-- game's own selection instead of a bare EquipItem.
+					local slot
+					if autotool then
+						for i, v in store.inventory.hotbar do
+							if v.item and v.item.itemType == tool.itemType then
+								slot = i - 1
+								break
+							end
+						end
+					end
+					-- Falls through whenever the hotbar route is off, the tool is not on the
+					-- hotbar, or that slot is already selected. The equip itself is not
+					-- optional: block damage is resolved from whatever the player is holding
+					-- (BlockEngine.calculateBlockDamage takes the player), so skipping it
+					-- would mine with the sword.
+					if not (slot and hotbarSwitch(slot)) then
+						switchItem(tool.tool)
+					end
 				end
 			end
 
