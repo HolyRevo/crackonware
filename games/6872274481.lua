@@ -1121,15 +1121,26 @@ run(function()
 		end
 	end
 
-	bedwars.breakBlock = function(block, effects, anim, customHealthbar)
+	-- blockcheck: dig the blocks covering the target (a bed's contained positions) rather
+	--   than the target itself. nil leaves it on, which is what every existing caller got.
+	-- method: 'Distance' scores candidates by how far the dig spot is from the player;
+	--   anything else keeps the original scoring, fewest hits to get through.
+	-- The scoring matters: picking purely by hit count can settle on a spot on the far side
+	-- of the block, and the 30-stud guard below then aborts the break outright.
+	bedwars.breakBlock = function(block, effects, anim, customHealthbar, blockcheck, method)
 		if lplr:GetAttribute('DenyBlockBreak') or not entitylib.isAlive then return end
 		local handler = bedwars.BlockController:getHandlerRegistry():getHandler(block.Name)
 		local cost, pos, target, path = math.huge
+		local selfpos = entitylib.character.RootPart.Position
+		local positions = ((blockcheck == nil or blockcheck) and handler and handler:getContainedPositions(block)) or {block.Position / 3}
 
-		for _, v in (handler and handler:getContainedPositions(block) or {block.Position / 3}) do
+		for _, v in positions do
 			local dpos, dcost, dpath = calculatePath(block, v * 3)
-			if dpos and dcost < cost then
-				cost, pos, target, path = dcost, dpos, v * 3, dpath
+			if dpos then
+				local score = method == 'Distance' and (selfpos - dpos).Magnitude or dcost
+				if score < cost then
+					cost, pos, target, path = score, dpos, v * 3, dpath
+				end
 			end
 		end
 
@@ -2696,6 +2707,8 @@ run(function()
 	local Health
 	local Distance
 	local Equipment
+	local Rank
+	local Device
 	local DrawingToggle
 	local Scale
 	local FontOption
@@ -2711,7 +2724,85 @@ run(function()
 	end)
 	
 	local methodused
-	
+	-- assigned once the Updated table below exists; lets the rank fetch redraw a tag when
+	-- the division finally lands
+	local refreshTag
+
+	local RankMeta = (function()
+		local suc, res = pcall(function()
+			return require(replicatedStorage.TS.rank['rank-meta']).RankMeta
+		end)
+		return suc and res or nil
+	end)()
+
+	local rankRequested = {}
+
+	local function getRankImage(plr)
+		if not (RankMeta and plr) then return nil end
+		local controller = bedwars.RankController
+		local cache = controller and controller.rankCache
+		local division = cache and cache[plr.UserId]
+		local meta = division and RankMeta[division]
+		return meta and meta.image or nil
+	end
+
+	-- the icon rides the right edge of the text, so everywhere that re-measures the tag has
+	-- to move it as well
+	local function positionRankIcon(nametag, width)
+		local icon = nametag:FindFirstChild('RankIcon')
+		if icon then
+			icon.Position = UDim2.fromOffset(width + 10, -4)
+		end
+	end
+
+	local function requestRank(plr, ent)
+		if not plr or rankRequested[plr.UserId] then return end
+		local controller = bedwars.RankController
+		if not (controller and controller.getRanks) then return end
+		rankRequested[plr.UserId] = true
+		task.spawn(function()
+			pcall(function()
+				-- forced: getRanks skips the server call once its cache holds anything, so
+				-- an uncached player would otherwise never resolve
+				controller:getRanks({plr.UserId}, true):andThen(function()
+					if refreshTag then refreshTag(ent) end
+				end)
+			end)
+		end)
+	end
+
+	local deviceEmojis = {gamepad = '🎮', touch = '📱', keyboard = '🖥️'}
+
+	local function getDeviceEmoji(plr)
+		if not plr then return nil end
+		-- checked on the character too, in case the attribute is written there
+		local inputType = plr:GetAttribute('UserInputType')
+		if inputType == nil and plr.Character then
+			inputType = plr.Character:GetAttribute('UserInputType')
+		end
+		if inputType == nil then return nil end
+		if type(inputType) == 'number' then
+			-- Enum.UserInputType values: Touch 7, Keyboard 8, Gamepad1..8 9-16
+			if inputType == 7 then return deviceEmojis.touch end
+			if inputType == 8 then return deviceEmojis.keyboard end
+			if inputType >= 9 and inputType <= 16 then return deviceEmojis.gamepad end
+			return deviceEmojis.keyboard
+		end
+		-- covers a plain string and an EnumItem alike ("Enum.UserInputType.Touch"), and the
+		-- platform-flavoured values some servers write instead of the enum names
+		local name = tostring(inputType):lower()
+		if name:find('gamepad') or name:find('console') or name:find('xbox') or name:find('playstation') then
+			return deviceEmojis.gamepad
+		end
+		if name:find('touch') or name:find('mobile') or name:find('phone') or name:find('tablet') then
+			return deviceEmojis.touch
+		end
+		-- anything left that carries a value at all is a desktop input (keyboard, any of
+		-- the mouse variants, MouseMovement, TextInput...), so fall through rather than
+		-- silently showing nothing
+		return name ~= '' and deviceEmojis.keyboard or nil
+	end
+
 	local Added = {
 		Normal = function(ent)
 			pcall(function()
@@ -2722,6 +2813,13 @@ run(function()
 
 				local nametag = Instance.new('TextLabel')
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
+
+				if Device.Enabled and ent.Player then
+					local emoji = getDeviceEmoji(ent.Player)
+					if emoji then
+						Strings[ent] = emoji..' '..Strings[ent]
+					end
+				end
 
 				if Health.Enabled then
 					local healthColor = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
@@ -2749,6 +2847,21 @@ run(function()
 				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 				nametag.Name = ent.Player and ent.Player.Name or ent.Character.Name
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+
+				-- Rank Icon: sits immediately to the right of the text, so it has to be
+				-- built after the text has been measured
+				if Rank.Enabled and ent.Player then
+					local Icon = Instance.new('ImageLabel')
+					Icon.Name = 'RankIcon'
+					Icon.Size = UDim2.fromOffset(30, 30)
+					Icon.Position = UDim2.fromOffset(size.X + 10, -4)
+					Icon.BackgroundTransparency = 1
+					Icon.Image = getRankImage(ent.Player) or ''
+					Icon.Parent = nametag
+					if Icon.Image == '' then
+						requestRank(ent.Player, ent)
+					end
+				end
 				nametag.AnchorPoint = Vector2.new(0.5, 1)
 				nametag.BackgroundColor3 = Color3.new()
 				nametag.BackgroundTransparency = Background.Value
@@ -2779,6 +2892,15 @@ run(function()
 				nametag.Text.Font = 0
 				nametag.Text.ZIndex = 2
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
+
+				-- Drawing text only; the rank icon needs an ImageLabel, which this render
+				-- path has no equivalent for
+				if Device.Enabled and ent.Player then
+					local emoji = getDeviceEmoji(ent.Player)
+					if emoji then
+						Strings[ent] = emoji..' '..Strings[ent]
+					end
+				end
 
 				if Health.Enabled then
 					Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
@@ -2838,6 +2960,13 @@ run(function()
 				Sizes[ent] = nil
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
 
+				if Device.Enabled and ent.Player then
+					local emoji = getDeviceEmoji(ent.Player)
+					if emoji then
+						Strings[ent] = emoji..' '..Strings[ent]
+					end
+				end
+
 				if Health.Enabled then
 					local healthColor = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
 					Strings[ent] = Strings[ent]..' <font color="rgb('..tostring(math.floor(healthColor.R * 255))..','..tostring(math.floor(healthColor.G * 255))..','..tostring(math.floor(healthColor.B * 255))..')">'..math.round(ent.Health)..'</font>'
@@ -2857,8 +2986,16 @@ run(function()
 					nametag.Kit.Image = kit and kit ~= 'none' and bedwars.BedwarsKitMeta[kit].renderImage or ''
 				end
 
+				if Rank.Enabled and ent.Player then
+					local icon = nametag:FindFirstChild('RankIcon')
+					if icon then
+						icon.Image = getRankImage(ent.Player) or ''
+					end
+				end
+
 				local size = getfontsize(removeTags(Strings[ent]), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 				nametag.Size = UDim2.fromOffset(size.X + 8, size.Y + 7)
+				positionRankIcon(nametag, size.X)
 				nametag.Text = Strings[ent]
 			end)
 		end,
@@ -2872,6 +3009,13 @@ run(function()
 				end
 				Sizes[ent] = nil
 				Strings[ent] = ent.Player and whitelist:tag(ent.Player, true)..(DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
+
+				if Device.Enabled and ent.Player then
+					local emoji = getDeviceEmoji(ent.Player)
+					if emoji then
+						Strings[ent] = emoji..' '..Strings[ent]
+					end
+				end
 
 				if Health.Enabled then
 					Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
@@ -2890,6 +3034,12 @@ run(function()
 		end
 	}
 	
+	refreshTag = function(ent)
+		if Reference[ent] and Updated[methodused] then
+			Updated[methodused](ent)
+		end
+	end
+
 	local ColorFunc = {
 		Normal = function(hue, sat, val)
 			pcall(function()
@@ -2945,6 +3095,7 @@ run(function()
 							nametag.Text = string.format(Strings[ent], mag)
 							local ize = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
 							nametag.Size = UDim2.fromOffset(ize.X + 8, ize.Y + 7)
+							positionRankIcon(nametag, ize.X)
 							Sizes[ent] = mag
 						end
 					end
@@ -3030,6 +3181,25 @@ run(function()
 				if Loop[methodused] then
 					NameTags:Clean(runService.RenderStepped:Connect(Loop[methodused]))
 				end
+
+				-- UserInputType can replicate after the tag was built (and changes when a
+				-- player switches input), and the tag is only rebuilt on health/equipment
+				-- updates -- which is why the emoji was missing on some players and not
+				-- others. Redraw whoever's attribute lands or changes.
+				local function watchDevice(plr)
+					NameTags:Clean(plr:GetAttributeChangedSignal('UserInputType'):Connect(function()
+						if not Device.Enabled then return end
+						local ent = entitylib.getEntity(plr)
+						if ent then
+							refreshTag(ent)
+						end
+					end))
+				end
+
+				for _, plr in playersService:GetPlayers() do
+					watchDevice(plr)
+				end
+				NameTags:Clean(playersService.PlayerAdded:Connect(watchDevice))
 			else
 				if Removed[methodused] then
 					for i in Reference do
@@ -3119,6 +3289,26 @@ run(function()
 				NameTags:Toggle()
 			end
 		end
+	})
+	Rank = NameTags:CreateToggle({
+		Name = 'Show Rank',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle()
+				NameTags:Toggle()
+			end
+		end,
+		Tooltip = 'Shows the ranked division icon above the nametag'
+	})
+	Device = NameTags:CreateToggle({
+		Name = 'Show Device',
+		Function = function()
+			if NameTags.Enabled then
+				NameTags:Toggle()
+				NameTags:Toggle()
+			end
+		end,
+		Tooltip = 'Shows 🎮 / 🖥️ / 📱 for the input device the player is on'
 	})
 	DisplayName = NameTags:CreateToggle({
 		Name = 'Use Displayname',
