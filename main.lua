@@ -1,4 +1,7 @@
-if shared.vape then shared.vape:Uninject() end
+-- pcall'd: after a teleport shared.vape can still point at the previous server's instance,
+-- whose GUI and connections no longer exist. An error walking that corpse would abort main.lua
+-- on line one and leave the queued re-injection doing nothing at all.
+if shared.vape then pcall(function() shared.vape:Uninject() end) end
 
 local vape
 local loadstring = function(...)
@@ -166,12 +169,18 @@ local function finishLoading()
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function()
 		if (not teleportedServers) and (not shared.VapeIndependent) then
 			teleportedServers = true
+			-- Re-runs main.lua, not the loader. The loader is a full boot -- duplicate-run
+			-- guard, GitHub API calls for the update check, the console window, the config
+			-- prompt -- and any one of those bailing on the new server leaves the script
+			-- uninjected. main.lua only needs the files the loader already cached, so it
+			-- comes back reliably; the loader still runs on a manual execute.
 			local teleportScript = [[
 				shared.vapereload = true
-				if shared.PistonwareDeveloper then
-					loadstring(readfile('pistonware/loader.lua'), 'loader')()
+				local cached = isfile and isfile('pistonware/main.lua') and readfile('pistonware/main.lua')
+				if cached and cached ~= '' then
+					loadstring(cached, 'main')()
 				else
-					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/loader.lua', true), 'loader')()
+					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/main.lua', true), 'main')()
 				end
 			]]
 			if shared.PistonwareDeveloper then
