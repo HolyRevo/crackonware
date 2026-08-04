@@ -209,6 +209,28 @@ local function getTool(breakType)
 	return best, slot
 end
 
+-- Fallback for a block type nothing in the inventory is specialised for -- wool while
+-- carrying a pickaxe but no shears, say. getTool only matches a tool declaring the
+-- block's own breakType, so it returns nil there and the swap was skipped entirely,
+-- leaving the sword in hand. A break tool still beats that, so take the strongest one
+-- available judged by its best break value across all types. Only consulted after an
+-- exact type match fails, so shears still win for wool whenever they're carried.
+local function getBestBreakTool()
+	local best, maxDmg = nil, 0
+	for _, item in store.inventory.inventory.items do
+		local meta = bedwars.ItemMeta[item.itemType]
+		local breakBlock = meta and meta.breakBlock
+		if breakBlock then
+			for _, dmg in breakBlock do
+				if type(dmg) == 'number' and dmg > maxDmg then
+					best, maxDmg = item, dmg
+				end
+			end
+		end
+	end
+	return best
+end
+
 local function getWool(inv)
 	for _, item in (inv or store.inventory.inventory.items) do
 		if item and item.itemType and item.itemType:find("wool") then
@@ -1203,31 +1225,54 @@ run(function()
 			local dblock, dpos = getPlacedBlock(pos)
 			if not dblock then return end
 
-			if (workspace:GetServerTimeNow() - bedwars.SwordController.lastAttack) > 0.4 then
-				local breaktype = bedwars.ItemMeta[dblock.Name].block.breakType
-				local tool = store.tools[breaktype]
-				if tool then
+			-- The recent-swing gate keeps the sword in hand mid-fight for callers that
+			-- pass autotool=false. When the caller explicitly asked for AutoTool it has
+			-- to win instead: Breaker runs its loop continuously, so with a killaura or
+			-- autoclicker active lastAttack is refreshed constantly, this window never
+			-- opened and the tool swap simply never happened -- the block got mined with
+			-- whatever was already held.
+			local blockmeta = bedwars.ItemMeta[dblock.Name]
+			blockmeta = blockmeta and blockmeta.block
+			if blockmeta and (autotool or (workspace:GetServerTimeNow() - bedwars.SwordController.lastAttack) > 0.4) then
+				local breaktype = blockmeta.breakType
+				-- store.tools is only rebuilt when the Rodux inventory fires an items
+				-- change, so it can still be empty (or stale) at the moment a break
+				-- starts. Rescan on a miss rather than silently skipping the swap --
+				-- a nil here meant the whole block below was skipped and the block got
+				-- mined with the sword, which looks exactly like AutoTool doing nothing.
+				local tool = breaktype and (store.tools[breaktype] or getTool(breaktype))
+				-- Exact type match first (shears for wool), then the best break tool
+				-- carried (a pickaxe on wool). Gated on autotool so the other callers,
+				-- which pass it nil, keep their previous hold-the-sword behaviour.
+				if not tool and autotool then
+					tool = getBestBreakTool()
+				end
+				if tool and tool.tool then
 					-- autotool: move the hotbar selection onto the tool the way the AutoTool
 					-- module does it -- an InventorySelectHotbarSlot dispatch, i.e. the same
 					-- path as pressing the number key -- so the swap happens through the
 					-- game's own selection instead of a bare EquipItem.
 					local slot
 					if autotool then
-						for i, v in store.inventory.hotbar do
+						for i, v in store.inventory.hotbar or {} do
 							if v.item and v.item.itemType == tool.itemType then
 								slot = i - 1
 								break
 							end
 						end
 					end
-					-- Falls through whenever the hotbar route is off, the tool is not on the
-					-- hotbar, or that slot is already selected. The equip itself is not
-					-- optional: block damage is resolved from whatever the player is holding
-					-- (BlockEngine.calculateBlockDamage takes the player), so skipping it
-					-- would mine with the sword.
-					if not (slot and hotbarSwitch(slot)) then
-						switchItem(tool.tool)
+					-- Both, not either. The hotbar dispatch only moves the client's
+					-- selected slot; it is not proof the character actually ended up
+					-- holding the tool. Treating a successful dispatch as "done" and
+					-- skipping the equip is what left the sword in hand while the UI
+					-- showed the pickaxe selected -- and block damage is resolved from
+					-- what is actually held (BlockEngine.calculateBlockDamage takes the
+					-- player), so the block still got mined with the sword. switchItem
+					-- no-ops when the tool is already in hand, so this costs nothing.
+					if slot then
+						hotbarSwitch(slot)
 					end
+					switchItem(tool.tool)
 				end
 			end
 
@@ -4979,134 +5024,6 @@ run(function()
 end)
 	
 run(function()
-	local AutoBank
-	local UIToggle
-	local UI
-	local Chests
-	local Items = {}
-	
-	local function addItem(itemType, shop)
-		local item = Instance.new('ImageLabel')
-		item.Image = bedwars.getIcon({itemType = itemType}, true)
-		item.Size = UDim2.fromOffset(32, 32)
-		item.Name = itemType
-		item.BackgroundTransparency = 1
-		item.LayoutOrder = #UI:GetChildren()
-		item.Parent = UI
-		local itemtext = Instance.new('TextLabel')
-		itemtext.Name = 'Amount'
-		itemtext.Size = UDim2.fromScale(1, 1)
-		itemtext.BackgroundTransparency = 1
-		itemtext.Text = ''
-		itemtext.TextColor3 = Color3.new(1, 1, 1)
-		itemtext.TextSize = 16
-		itemtext.TextStrokeTransparency = 0.3
-		itemtext.Font = Enum.Font.Arial
-		itemtext.Parent = item
-		Items[itemType] = {Object = itemtext, Type = shop}
-	end
-	
-	local function refreshBank(echest)
-		for i, v in Items do
-			local item = echest:FindFirstChild(i)
-			v.Object.Text = item and item:GetAttribute('Amount') or ''
-		end
-	end
-	
-	local function nearChest()
-		if entitylib.isAlive then
-			local pos = entitylib.character.RootPart.Position
-			for _, chest in Chests do
-				if (chest.Position - pos).Magnitude < 20 then
-					return true
-				end
-			end
-		end
-	end
-	
-	local function handleState()
-		local chest = replicatedStorage.Inventories:FindFirstChild(lplr.Name..'_personal')
-		if not chest then return end
-	
-		local mapCF = workspace.MapCFrames:FindFirstChild((lplr:GetAttribute('Team') or 1)..'_spawn')
-		if mapCF and (entitylib.character.RootPart.Position - mapCF.Value.Position).Magnitude < 80 then
-			for _, v in chest:GetChildren() do
-				local item = Items[v.Name]
-				if item then
-					task.spawn(function()
-						bedwars.Client:GetNamespace('Inventory'):Get('ChestGetItem'):CallServer(chest, v)
-						refreshBank(chest)
-					end)
-				end
-			end
-		else
-			for _, v in store.inventory.inventory.items do
-				local item = Items[v.itemType]
-				if item then
-					task.spawn(function()
-						bedwars.Client:GetNamespace('Inventory'):Get('ChestGiveItem'):CallServer(chest, v.tool)
-						refreshBank(chest)
-					end)
-				end
-			end
-		end
-	end
-	
-	AutoBank = vape.Categories.Inventory:CreateModule({
-		Name = 'AutoBank',
-		Function = function(callback)
-			if callback then
-				Chests = collection('personal-chest', AutoBank)
-				UI = Instance.new('Frame')
-				UI.Size = UDim2.new(1, 0, 0, 32)
-				UI.Position = UDim2.fromOffset(0, -240)
-				UI.BackgroundTransparency = 1
-				UI.Visible = UIToggle.Enabled
-				UI.Parent = vape.gui
-				AutoBank:Clean(UI)
-				local Sort = Instance.new('UIListLayout')
-				Sort.FillDirection = Enum.FillDirection.Horizontal
-				Sort.HorizontalAlignment = Enum.HorizontalAlignment.Center
-				Sort.SortOrder = Enum.SortOrder.LayoutOrder
-				Sort.Parent = UI
-				addItem('iron', true)
-				addItem('gold', true)
-				addItem('diamond', false)
-				addItem('emerald', true)
-				addItem('void_crystal', true)
-	
-				repeat
-					local hotbar = lplr.PlayerGui:FindFirstChild('hotbar')
-					hotbar = hotbar and hotbar['1']:FindFirstChild('HotbarHealthbarContainer')
-					if hotbar then
-						UI.Position = UDim2.fromOffset(0, (hotbar.AbsolutePosition.Y + guiService:GetGuiInset().Y) - 40)
-					end
-	
-					local newState = nearChest()
-					if newState then
-						handleState()
-					end
-	
-					task.wait(0.1)
-				until (not AutoBank.Enabled)
-			else
-				table.clear(Items)
-			end
-		end,
-		Tooltip = 'Automatically puts resources in ender chest'
-	})
-	UIToggle = AutoBank:CreateToggle({
-		Name = 'UI',
-		Function = function(callback)
-			if AutoBank.Enabled then
-				UI.Visible = callback
-			end
-		end,
-		Default = true
-	})
-end)
-	
-run(function()
 	local AutoBuy
 	local Sword
 	local Armor
@@ -5159,7 +5076,14 @@ run(function()
 		if entitylib.isAlive then
 			local localPosition = entitylib.character.RootPart.Position
 			for _, v in store.shop do
-				if (v.RootPart.Position - localPosition).Magnitude <= 20 then
+				-- GetPivot rather than .Position: the BedwarsItemShop tag sits on the
+				-- shop container, not on a part -- the game's own getShopkeeperModel
+				-- resolves the NPC as tagged:FindFirstChildWhichIsA('Model'), so the
+				-- tagged instance is whatever holds desertMerchant. When that's a
+				-- Model, .Position doesn't exist and indexing it throws, taking this
+				-- whole function down so no shop ever registers. GetPivot is defined
+				-- on both Model and BasePart, so it works either way.
+				if (v.RootPart:GetPivot().Position - localPosition).Magnitude <= 20 then
 					shop = v.Upgrades or v.Shop or nil
 					upgrades = upgrades or v.Upgrades
 					items = items or v.Shop
