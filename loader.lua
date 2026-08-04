@@ -703,9 +703,39 @@ local function createConsole()
 	answers.Visible = false
 	answers.Parent = window
 	local answersLayout = Instance.new('UIListLayout')
+	answersLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	answersLayout.FillDirection = Enum.FillDirection.Horizontal
 	answersLayout.Padding = UDim.new(0, 12)
 	answersLayout.Parent = answers
+
+	-- Explains what the hovered answer actually does. It rides in the same list layout as the
+	-- buttons (LayoutOrder puts it last, after however many there are) so it lands on their row
+	-- with the same gap between, and a hidden child takes no space -- the row closes up around
+	-- it while nothing is hovered. Ask() only clears TextButtons, so this survives each question.
+	local tooltip = Instance.new('TextLabel')
+	tooltip.Name = 'Tooltip'
+	tooltip.LayoutOrder = 999
+	tooltip.AutomaticSize = Enum.AutomaticSize.X
+	tooltip.Size = UDim2.fromOffset(0, 34)
+	tooltip.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+	tooltip.BorderSizePixel = 0
+	tooltip.Visible = false
+	tooltip.Text = ''
+	tooltip.TextColor3 = Palette.Line
+	tooltip.TextSize = 15
+	tooltip.Font = Enum.Font.Code
+	tooltip.Parent = answers
+	local tooltipPadding = Instance.new('UIPadding')
+	tooltipPadding.PaddingLeft = UDim.new(0, 12)
+	tooltipPadding.PaddingRight = UDim.new(0, 12)
+	tooltipPadding.Parent = tooltip
+	local tooltipCorner = Instance.new('UICorner')
+	tooltipCorner.CornerRadius = UDim.new(0, 4)
+	tooltipCorner.Parent = tooltip
+	local tooltipStroke = Instance.new('UIStroke')
+	tooltipStroke.Color = Palette.ButtonBorder
+	tooltipStroke.Thickness = 1
+	tooltipStroke.Parent = tooltip
 
 	local footer = Instance.new('TextLabel')
 	footer.AnchorPoint = Vector2.new(0, 1)
@@ -775,9 +805,13 @@ local function createConsole()
 			end
 		end
 
+		tooltip.Visible = false
+
 		local choice
-		for _, def in buttons do
+		for index, def in buttons do
 			local button = Instance.new('TextButton')
+			-- keeps the buttons in the order given, ahead of the tooltip that trails them
+			button.LayoutOrder = index
 			button.Size = UDim2.fromOffset(132, 34)
 			button.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
 			button.BorderSizePixel = 0
@@ -800,10 +834,15 @@ local function createConsole()
 			button.MouseEnter:Connect(function()
 				stroke.Color = Palette.Accent
 				button.TextColor3 = Palette.Accent
+				if def.tooltip then
+					tooltip.Text = def.tooltip
+					tooltip.Visible = true
+				end
 			end)
 			button.MouseLeave:Connect(function()
 				stroke.Color = Palette.ButtonBorder
 				button.TextColor3 = Palette.ButtonIdle
+				tooltip.Visible = false
 			end)
 			button.MouseButton1Click:Connect(function()
 				choice = def.key
@@ -819,6 +858,7 @@ local function createConsole()
 				child:Destroy()
 			end
 		end
+		tooltip.Visible = false
 		self:SetLine('')
 		if choice == nil then
 			return fallback
@@ -978,8 +1018,8 @@ if firstRunProfiles and not declinedDownload then
 	console:SetProgress(0.47)
 	local ok, res = pcall(function()
 		return console:Ask('Would you like to download the latest config?', {
-			{text = 'Yes', key = true},
-			{text = 'No', key = false}
+			{text = 'Yes', key = true, tooltip = 'Downloads the Blatant and Legit configs from GitHub'},
+			{text = 'No', key = false, tooltip = 'Starts on default settings and stops asking on future runs'}
 		}, 60, true)
 	end)
 	-- checked before the answer is acted on, so cancelling mid-question never counts as a 'No'
@@ -1035,8 +1075,8 @@ if not firstRunProfiles and not declinedDownload and not isReload then
 		console:SetProgress(0.6)
 		local ok, wantsSync = pcall(function()
 			return console:Ask('Would you like to sync to the latest config?', {
-				{text = 'Yes', key = true},
-				{text = 'No', key = false}
+				{text = 'Yes', key = true, tooltip = 'Replaces the shipped configs with the newer ones on GitHub'},
+				{text = 'No', key = false, tooltip = 'Keeps the configs you have, asks again next session'}
 			}, 60, false)
 		end)
 		if console:IsAborted() then deleteInstall() return end
@@ -1083,8 +1123,8 @@ if downloadedConfigs then
 	-- type(choice) guard below skips the override and the saved profile decides.
 	local ok, choice = pcall(function()
 		return console:Ask('Which config would you like to load by default?', {
-			{text = 'Blatant', key = 'blatant'},
-			{text = 'Legit', key = 'legit'}
+			{text = 'Blatant', key = 'blatant', tooltip = 'Makes Blatant your default config: everything on, obvious'},
+			{text = 'Legit', key = 'legit', tooltip = 'Makes Legit your default config: toned down to look normal'}
 		}, 120, nil)
 	end)
 	if console:IsAborted() then deleteInstall() return end
