@@ -362,13 +362,18 @@ local AsciiShades = {
 	['.'] = '#4A4A4A'
 }
 
--- Cancelling the loader has to leave nothing behind, so this wipes the whole install folder.
--- delfolder already recurses on the executors that have it; the manual walk is for the ones
--- that only ship delfile.
+-- Cancelling the loader has to leave nothing behind that THIS boot created, so on a fresh
+-- install the whole folder is wiped. On an install that already existed before this run the
+-- wipe is skipped entirely -- the folder holds the user's custom profiles, and cancelling a
+-- reinject must never cost them those; only an explicit reinstall (reinstall.lua) deletes an
+-- existing install. delfolder already recurses on the executors that have it; the manual walk
+-- is for the ones that only ship delfile.
+local freshInstall = false
 local function deleteInstall()
 	-- every cancel/abort path comes through here, so a cancelled boot immediately frees the
 	-- duplicate-execution guard for the next manual run
 	shared.PistonwareLoaderBoot = nil
+	if not freshInstall then return end
 	pcall(function()
 		if delfolder then
 			delfolder('pistonware')
@@ -530,8 +535,9 @@ local function createConsole()
 	end
 
 	-- Closing the window by hand is a cancel, not a dismissal: the boot stops at the next
-	-- checkpoint and everything the install wrote is deleted, so a half-finished install can't
-	-- be left behind (and no config gets silently picked for you).
+	-- checkpoint, and on a first install everything the run wrote is deleted so a half-finished
+	-- install can't be left behind (and no config gets silently picked for you). On an existing
+	-- install deleteInstall refuses to wipe, so cancelling a reinject just stops the boot.
 	local function cancel()
 		if aborted then return end
 		aborted = true
@@ -906,6 +912,10 @@ do
 	end
 end
 
+-- Decided before the folders are created, while 'did this run create the install' is still
+-- observable. No yield separates this from the console appearing, so a cancel cannot land
+-- in between and read the flag before it is set.
+freshInstall = not isfolder('pistonware')
 for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pistonware/assets', 'pistonware/libraries', 'pistonware/guis'} do
 	if not isfolder(folder) then
 		makefolder(folder)
