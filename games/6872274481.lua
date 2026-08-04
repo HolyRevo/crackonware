@@ -988,7 +988,7 @@ run(function()
 	for i, v in remoteNames do
 		local remote = dumpRemote(debug.getconstants(v))
 		if remote == '' then
-			notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
+			--notif('Pistonware', 'Failed to grab remote ('..i..')', 10, 'alert')
 		end
 		remotes[i] = remote
 	end
@@ -3850,54 +3850,6 @@ run(function()
 end)
 	
 run(function()
-	local shooting, old = false
-	
-	local function getCrossbows()
-		local crossbows = {}
-		for i, v in store.inventory.hotbar do
-			if v.item and v.item.itemType:find('crossbow') and i ~= (store.inventory.hotbarSlot + 1) then table.insert(crossbows, i - 1) end
-		end
-		return crossbows
-	end
-	
-	vape.Categories.Utility:CreateModule({
-		Name = 'AutoShoot',
-		Function = function(callback)
-			if callback then
-				old = bedwars.ProjectileController.createLocalProjectile
-				bedwars.ProjectileController.createLocalProjectile = function(...)
-					local source, data, proj = ...
-					if source and (proj == 'arrow' or proj == 'fireball') and not shooting then
-						task.spawn(function()
-							local bows = getCrossbows()
-							if #bows > 0 then
-								shooting = true
-								task.wait(0.15)
-								local selected = store.inventory.hotbarSlot
-								for _, v in getCrossbows() do
-									if hotbarSwitch(v) then
-										task.wait(0.05)
-										mouse1click()
-										task.wait(0.05)
-									end
-								end
-								hotbarSwitch(selected)
-								shooting = false
-							end
-						end)
-					end
-					return old(...)
-				end
-			else
-				bedwars.ProjectileController.createLocalProjectile = old
-			end
-		end,
-		Tooltip = 'Automatically crossbow macro\'s'
-	})
-	
-end)
-	
-run(function()
 	local AutoToxic
 	local GG
 	local Toggles, Lists, said, dead = {}, {}, {}
@@ -4266,52 +4218,119 @@ run(function()
 		return nil
 	end
 	
-	local function checkJoin(plr, connection)
-		if not plr:GetAttribute('Team') and plr:GetAttribute('Spectator') and not bedwars.Store:getState().Game.customMatch then
-			connection:Disconnect()
-			local tab, pages = {}, playersService:GetFriendsAsync(plr.UserId)
+	-- MatchState.RUNNING (match-state module: PRE 0, RUNNING 1, POST 2).
+	local MATCH_RUNNING = 1
+	-- A whole queue teleports into the server at once, but slow clients keep trickling in for a
+	-- while after the match has already flipped to RUNNING, and until the server finishes with
+	-- them they look exactly like a mid-match join: Spectator with no Team. Anyone who turns up
+	-- inside this window counts as part of the original queue.
+	local JOIN_GRACE = 45
+	-- Time to let a Team assignment land before calling someone team-less.
+	local SETTLE = 10
+	local matchRunningSince
+	-- Weak keys: entries for players who left go away on their own instead of pinning the Player
+	-- instance for the rest of the session.
+	local arrivedAfter = setmetatable({}, {__mode = 'k'})
+	local resolved = setmetatable({}, {__mode = 'k'})
+
+	-- Seconds the match has been RUNNING, or nil if it is not. Injecting mid-match starts this
+	-- clock at injection rather than at the true match start, which only ever makes the check
+	-- below more conservative. Read straight off the store rather than store.matchState: the
+	-- mirror is only filled in by the Store.changed handler, so it still reads PRE for the first
+	-- dispatch or two after injecting into an already-running match.
+	local function matchRunningFor()
+		if bedwars.Store:getState().Game.matchState ~= MATCH_RUNNING then
+			matchRunningSince = nil
+			return nil
+		end
+		matchRunningSince = matchRunningSince or os.clock()
+		return os.clock() - matchRunningSince
+	end
+
+	local function isSpectating(plr)
+		return plr:GetAttribute('Spectator') == true and not plr:GetAttribute('Team')
+	end
+
+	local function checkJoin(plr)
+		if resolved[plr] or not isSpectating(plr) then return end
+		if bedwars.Store:getState().Game.customMatch then return end
+
+		-- Gate on when the player ARRIVED, not on when this check happens to fire. A late
+		-- loader's Spectator attribute can settle minutes into the match, long past the grace
+		-- window, so keying the window off 'now' -- as this did by having no window at all --
+		-- is what flagged them. nil means they were already here when StaffDetector turned on,
+		-- and we never saw them arrive, so there is nothing to judge.
+		local arrival = arrivedAfter[plr]
+		if not arrival or arrival < JOIN_GRACE then return end
+
+		resolved[plr] = true
+		-- Let them finish loading before deciding they have no team. 'PlayerConnected' is the
+		-- game's own has-this-client-finished-connecting flag (GamePlayer.hasFinishedConnecting).
+		local deadline = os.clock() + 30
+		while plr.Parent and plr:GetAttribute('PlayerConnected') ~= true and os.clock() < deadline do
+			task.wait(0.5)
+		end
+		task.wait(SETTLE)
+		-- Re-verify. A late loader has a Team by now, at which point there was never anything
+		-- to report; clearing resolved lets a genuine later transition still be caught.
+		if not plr.Parent or not isSpectating(plr) then
+			resolved[plr] = nil
+			return
+		end
+
+		local suc, tab = pcall(function()
+			local ids, pages = {}, playersService:GetFriendsAsync(plr.UserId)
 			for _ = 1, 4 do
 				for _, v in pages:GetCurrentPage() do
-					table.insert(tab, v.Id)
+					table.insert(ids, v.Id)
 				end
 				if pages.IsFinished then break end
 				pages:AdvanceToNextPageAsync()
 			end
-	
-			local friend = checkFriends(tab)
-			if not friend then
-				staffFunction(plr, 'impossible_join')
-				return true
-			else
-				notif('StaffDetector', string.format('Spectator %s joined from %s', plr.Name, friend), 20, 'warning')
-			end
+			return ids
+		end)
+		-- GetFriendsAsync throws on rate limits and on private friend lists. A failed lookup is
+		-- not evidence of anything -- treating it as 'has no friends here' would flag on nothing.
+		if not suc then
+			resolved[plr] = nil
+			return
+		end
+
+		local friend = checkFriends(tab)
+		if not friend then
+			staffFunction(plr, 'impossible_join')
+		else
+			notif('StaffDetector', string.format('Spectator %s joined from %s', plr.Name, friend), 20, 'warning')
 		end
 	end
-	
-	local function playerAdded(plr)
+
+	local function playerAdded(plr, existing)
 		joined[plr.UserId] = plr.Name
 		if plr == lplr then return end
-	
+		if not existing then
+			arrivedAfter[plr] = matchRunningFor()
+		end
+
 		if table.find(blacklisteduserids, plr.UserId) or table.find(Users.ListEnabled, tostring(plr.UserId)) then
 			staffFunction(plr, 'blacklisted_user')
 		elseif getRole(plr, 5774246) >= 100 then
 			staffFunction(plr, 'staff_role')
 		else
-			local connection
-			connection = plr:GetAttributeChangedSignal('Spectator'):Connect(function()
-				checkJoin(plr, connection)
-			end)
-			StaffDetector:Clean(connection)
-			if checkJoin(plr, connection) then
-				return
-			end
-	
+			-- Spawned rather than called inline: checkJoin now yields while the player settles,
+			-- and blocking the signal handler would stall every later attribute change on them.
+			StaffDetector:Clean(plr:GetAttributeChangedSignal('Spectator'):Connect(function()
+				task.spawn(checkJoin, plr)
+			end))
+			-- Covers a mid-match join whose Spectator attribute replicated with the player, so
+			-- no change signal ever fires for it.
+			task.spawn(checkJoin, plr)
+
 			if not plr:GetAttribute('ClanTag') then
 				plr:GetAttributeChangedSignal('ClanTag'):Wait()
 			end
-	
+
 			if table.find(blacklistedclans, plr:GetAttribute('ClanTag')) and vape.Loaded and Clans.Enabled then
-				connection:Disconnect()
+				resolved[plr] = true
 				staffFunction(plr, 'blacklisted_clan_'..plr:GetAttribute('ClanTag'):lower())
 			end
 		end
@@ -4323,10 +4342,15 @@ run(function()
 			if callback then
 				StaffDetector:Clean(playersService.PlayerAdded:Connect(playerAdded))
 				for _, v in playersService:GetPlayers() do
-					task.spawn(playerAdded, v)
+					-- existing = true: these were already here, so no arrival stamp and no
+					-- impossible-join check. The blacklist and staff-role checks still run.
+					task.spawn(playerAdded, v, true)
 				end
 			else
 				table.clear(joined)
+				table.clear(arrivedAfter)
+				table.clear(resolved)
+				matchRunningSince = nil
 			end
 		end,
 		Tooltip = 'Detects people with a staff rank ingame'
