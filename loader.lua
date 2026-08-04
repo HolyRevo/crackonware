@@ -22,6 +22,9 @@ end
 local delfile = delfile or function(file)
 	writefile(file, '')
 end
+-- Named differently across executors, and absent on a few. Left nil when nothing is available;
+-- the one call site pcalls it and reports whether the copy actually happened.
+local setclipboard = setclipboard or toclipboard or (Clipboard and Clipboard.set)
 
 local Watermark = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.'
 
@@ -893,6 +896,12 @@ local function createConsole()
 	function console:Fail(err)
 		if closed then return end
 		self:SetStatus('FAILED', '#E15046')
+		-- Executor errors carry absolute file paths that run off the right edge on a single
+		-- line. Nothing is going to be asked at this point, so the output line is allowed to
+		-- wrap down through the space the answer row was holding.
+		line.TextWrapped = true
+		line.TextYAlignment = Enum.TextYAlignment.Top
+		line.Size = UDim2.new(1, -ContentPadding * 2, 0, AnswersY + 34 - LineY)
 		self:SetLine(err, Palette.Error)
 	end
 
@@ -1179,4 +1188,9 @@ if ok then
 	return result
 end
 warn('[pistonware] '..tostring(result))
-console:Fail('Injection failed: '..tostring(result))
+-- Copied as well as printed: the message is long, full of executor paths, and the person
+-- hitting it is usually being asked to report it. Done here rather than inside console:Fail so
+-- a headless reload (which has no window to read) still leaves it on the clipboard.
+local failure = 'Injection failed: '..tostring(result)
+local copied = pcall(function() setclipboard(failure) end)
+console:Fail(failure..(copied and '\n\n(copied to clipboard)' or ''))
