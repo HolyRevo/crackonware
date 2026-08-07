@@ -1,9 +1,24 @@
--- Two loader instances booting at once -- a double-tapped execute, or re-executing while
--- the first run is still holding on the ROBLOX loading screen -- would stack two identical
--- consoles and run every prompt and download twice (the hidden one's questions then time
--- out to their fallbacks and replay after the visible one closes). Later executions bail
--- while a boot is live; the timestamp goes stale after 180s so a boot that hard-crashed
--- can't lock the session out of ever injecting again.
+local PUBLIC_BUILD = true
+
+if PUBLIC_BUILD then
+	shared.PistonwareDeveloper = nil
+	pcall(function()
+		if getmetatable(shared) ~= nil then return end
+		setmetatable(shared, {
+			__index = function(self, key)
+				if key == 'PistonwareDeveloper' then return nil end
+				return rawget(self, key)
+			end,
+			__newindex = function(self, key, value)
+				if key == 'PistonwareDeveloper' then return end
+				rawset(self, key, value)
+			end
+		})
+	end)
+end
+
+local isDeveloper = (not PUBLIC_BUILD) and shared.PistonwareDeveloper and true or false
+
 if shared.PistonwareLoaderBoot and os.clock() - shared.PistonwareLoaderBoot < 180 then
 	warn('[pistonware] loader is already running, ignoring duplicate execution')
 	return
@@ -22,32 +37,74 @@ end
 local delfile = delfile or function(file)
 	writefile(file, '')
 end
--- Named differently across executors, and absent on a few. Left nil when nothing is available;
--- the one call site pcalls it and reports whether the copy actually happened.
+
 local setclipboard = setclipboard or toclipboard or (Clipboard and Clipboard.set)
 
 local Watermark = '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.'
 
+local SCRIPT_ID   = '2fb6964a070d89a7650354a0dcce302c'
+local GETKEY_URL  = 'https://ads.luarmor.net/get_key?for=Pistonware_Key-xnpnovpEljPO'
+local KEY_FILE    = 'pistonwarekey.json'
+local TARGET_URL  = 'https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua'
+local HELP_URL    = 'https://discord.gg/pistonware'
+-- ========================================================================
+
+local Strings = {
+	enter_key       = 'Enter your key below to continue.',
+	saved_expired   = 'Saved key expired - grab a new one below.',
+	saved_hwid      = 'Saved key is locked to another device.',
+	saved_incorrect = 'Saved key no longer exists - get a new one.',
+	saved_banned    = 'Saved key is blacklisted.',
+	placeholder     = 'Paste your key here',
+	get_key         = 'Get Key',
+	paste           = 'Paste',
+	submit          = 'Submit',
+	footer          = 'No key? Get Key -> finish checkpoints -> paste above.',
+	empty_key       = 'Enter your key first.',
+	bad_format      = "That doesn't look like a valid key.",
+	checking        = 'Checking key...',
+	valid_loading   = 'Key valid%s - loading...',
+	hwid_locked     = 'Key is locked to another device - reset your HWID via the bot.',
+	expired         = 'Key expired - grab a new one.',
+	banned          = 'Key is blacklisted.',
+	incorrect       = 'Key is incorrect or has been deleted.',
+	invalid_format  = 'Invalid key format.',
+	check_failed    = 'Check failed: %s (%s)',
+	link_copied     = 'Link copied! Finish the checkpoints, then paste your key.',
+	pasted          = 'Pasted from clipboard.',
+	clipboard_empty = 'Clipboard is empty.',
+	need_help       = 'Need Help?',
+	help_copied     = 'Help link copied to your clipboard!',
+	copy_failed     = 'Failed to copy script.',
+	no_library      = 'Failed to load the LuaArmor library.',
+	cancelled       = 'Key entry cancelled.',
+	headless        = 'No valid key saved - run the loader manually to enter one.'
+}
+
+local function t(key, ...)
+	local s = Strings[key] or key
+	if select('#', ...) > 0 then
+		return string.format(s, ...)
+	end
+	return s
+end
+
+local function trim(s)
+	return (tostring(s):gsub('^%s*(.-)%s*$', '%1'))
+end
+
 local function downloadFile(path, func)
 	if not isfile(path) then
-		-- bedwars.lua only exists in the GitLab repo (kept separate/obfuscated there), at that
-		-- repo's ROOT even though it caches locally under games/; everything else lives in the
-		-- GitHub repo.
 		local relPath = select(1, path:gsub('pistonware/', ''))
 		local isBedwars = relPath == 'games/bedwars.lua'
-		-- Retried a few times: raw file hosts intermittently fail, returning an empty body that
-		-- would otherwise get cached as a corrupt/empty file.
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
 				if isBedwars then
-					return game:HttpGet('https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua', true)
+					return game:HttpGet(TARGET_URL, true)
 				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
-			-- For .lua files, a compile check too: an outage can hand back the 503/error page
-			-- as the body, and caching that would poison the install silently (cache-first
-			-- means it would never be refetched).
 			if suc and res and res ~= '' and res ~= '404: Not Found' and (not path:find('.lua') or loadstring(res) ~= nil) then
 				content = res
 				break
@@ -67,8 +124,6 @@ local function downloadFile(path, func)
 	return (func or readfile)(path)
 end
 
--- Fetches the GitHub profiles folder listing; returns the decoded {name=,path=,type=} array, or nil on failure.
--- Pass a commit sha as `ref` to get the listing exactly as of that commit instead of branch head.
 local function fetchProfilesListing(ref)
 	local reqSuc, res = pcall(function()
 		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/contents/profiles'..(ref and ('?ref='..ref) or ''), true)
@@ -81,12 +136,6 @@ local function fetchProfilesListing(ref)
 	return body
 end
 
--- <GameId>.gui.txt is not a config -- it is the GUI's state file, and alongside the theme and
--- window layout it stores `Profile` (which config is equipped) and `Profiles` (the list the
--- Profiles tab shows, including ones the user made). Overwriting it wholesale during a sync
--- therefore deleted every custom profile from the list and snapped the equipped config back to
--- whatever the repo shipped. Merged instead: the repo supplies the theme/layout, the local file
--- keeps those two fields, so only the shipped configs are ever actually replaced.
 local function mergeGuiState(path, incoming)
 	if not path:find('%.gui%.txt$') then return incoming end
 	local ok, merged = pcall(function()
@@ -102,15 +151,9 @@ local function mergeGuiState(path, incoming)
 		end
 		return httpService:JSONEncode(new)
 	end)
-	-- unparseable on either side: fall back to writing exactly what the host sent
 	return (ok and type(merged) == 'string') and merged or incoming
 end
 
--- Downloads every file in a profiles listing concurrently. When `commit` is given, files are
--- fetched pinned to that exact commit sha and overwritten unconditionally -- branch-path raw
--- URLs can serve CDN-cached content for up to ~5 minutes after a push, which would make a
--- "sync" quietly reinstall the old profiles. `onProgress(done, total)` is optional and only
--- feeds the console line.
 local function downloadProfilesListing(body, commit, onProgress)
 	local files = {}
 	for _, v in body do
@@ -157,7 +200,6 @@ local function downloadProfilesListing(body, commit, onProgress)
 	done:Destroy()
 end
 
--- Returns the sha of the most recent commit that touched profiles/ on GitHub, or nil on failure.
 local function fetchProfilesCommit()
 	local reqSuc, res = pcall(function()
 		return game:HttpGet('https://api.github.com/repos/themagicpiston/pistonware/commits?path=profiles&sha=main&per_page=1', true)
@@ -170,16 +212,6 @@ local function fetchProfilesCommit()
 	return body[1].sha
 end
 
--- Keeps every cached .lua file current against the GitHub repo, using git blob shas.
--- One trees API call returns the content sha of EVERY file in the repo, so this costs two
--- API requests per session no matter how many files exist (a per-file commits lookup would
--- be one request each and die on GitHub's 60/hour unauthenticated limit).
--- pistonware/filecheck.json remembers the sha each cached file was last downloaded at; any
--- mismatch is re-downloaded pinned to the head commit (branch raw URLs can serve stale CDN
--- content for a few minutes after a push, commit-pinned ones cannot). Files whose watermark
--- line was removed are developer-owned and never touched -- exactly what the watermark has
--- always promised. bedwars.lua lives on GitLab, not in this tree, and keeps its own
--- bedwarscheck.txt system.
 local function updateCachedFiles(onProgress)
 	local httpService = cloneref(game:GetService('HttpService'))
 
@@ -210,27 +242,27 @@ local function updateCachedFiles(onProgress)
 		end
 	end
 
-	-- Only files already cached get refreshed here -- everything else keeps downloading on
-	-- demand, and is picked up by this pass on the session after it first appears.
-	local toUpdate = {}
+	local function managed(localPath)
+		if not isfile(localPath) then return false end
+		if PUBLIC_BUILD then return true end
+		return readfile(localPath):sub(1, #Watermark) == Watermark
+	end
+
 	for path, sha in remote do
 		local localPath = 'pistonware/'..path
-		if manifest[path] ~= sha and isfile(localPath) and readfile(localPath):sub(1, #Watermark) == Watermark then
+		if manifest[path] ~= sha and managed(localPath) then
 			table.insert(toUpdate, path)
 		end
 	end
 
 	local changed = false
 
-	-- Files deleted from the repo: drop the cached copy too, so a removed gui/game can't keep
-	-- loading from cache forever. Skipped if GitHub reports the tree listing as incomplete,
-	-- since a missing entry would be indistinguishable from a deleted file.
 	if not tree.truncated then
 		for path in manifest do
 			if not remote[path] then
 				pcall(function()
 					local localPath = 'pistonware/'..path
-					if isfile(localPath) and readfile(localPath):sub(1, #Watermark) == Watermark then
+					if managed(localPath) then
 						delfile(localPath)
 					end
 				end)
@@ -347,7 +379,8 @@ local Palette = {
 	Footer = Color3.fromRGB(110, 110, 110),
 	ButtonIdle = Color3.fromRGB(200, 200, 200),
 	ButtonBorder = Color3.fromRGB(60, 60, 60),
-	Error = Color3.fromRGB(225, 80, 70)
+	Error = Color3.fromRGB(225, 80, 70),
+	Ok = Color3.fromRGB(120, 225, 150)
 }
 
 -- Ascii shading: the art is one colour in a real terminal, but the piston only reads as a
@@ -773,10 +806,61 @@ local function createConsole()
 		end
 	end)
 
+	-- One flat terminal button, shared by the answer row Ask() builds and the key entry row
+	-- AskKey() builds. Callers stack their own MouseEnter/MouseLeave handlers on top of the
+	-- accent hover wired here; Roblox runs every connection, so nothing needs passing in.
+	local function answerButton(text, width, order)
+		local button = Instance.new('TextButton')
+		-- keeps the buttons in the order given, ahead of the tooltip that trails them
+		button.LayoutOrder = order
+		button.Size = UDim2.fromOffset(width, 34)
+		button.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+		button.BorderSizePixel = 0
+		button.AutoButtonColor = false
+		-- Frees the touch cursor so the button is tappable on phones (where input would
+		-- otherwise be locked to the game).
+		button.Modal = true
+		button.Text = text
+		button.TextColor3 = Palette.ButtonIdle
+		button.TextSize = 17
+		button.Font = Enum.Font.Code
+		button.Parent = answers
+		local corner = Instance.new('UICorner')
+		corner.CornerRadius = UDim.new(0, 4)
+		corner.Parent = button
+		local stroke = Instance.new('UIStroke')
+		stroke.Color = Palette.ButtonBorder
+		stroke.Thickness = 1
+		stroke.Parent = button
+		button.MouseEnter:Connect(function()
+			stroke.Color = Palette.Accent
+			button.TextColor3 = Palette.Accent
+		end)
+		button.MouseLeave:Connect(function()
+			stroke.Color = Palette.ButtonBorder
+			button.TextColor3 = Palette.ButtonIdle
+		end)
+		return button
+	end
+
+	-- Everything Ask()/AskKey() put on the answer row, cleared between prompts. The tooltip
+	-- label shares the frame and has to survive, hence the class test rather than a blanket
+	-- ClearAllChildren.
+	local function clearAnswers()
+		for _, child in answers:GetChildren() do
+			if child:IsA('TextButton') or child:IsA('TextBox') then
+				child:Destroy()
+			end
+		end
+	end
+
 	local console = {}
 
-	function console:SetStatus(text, color)
-		status.Text = '<font color="#9E9E9E">&gt;</font> <font color="'..(color or '#F07A1F')..'">'..text..'</font>'
+	-- `chevron` is the glyph in front of the status word. It points forward ('>') for every
+	-- step of the boot itself, and backward ('<') for the key gate, which is the one phase that
+	-- is holding the boot up rather than advancing it. Escaped, since the label is RichText.
+	function console:SetStatus(text, color, chevron)
+		status.Text = '<font color="#9E9E9E">'..(chevron == '<' and '&lt;' or '&gt;')..'</font> <font color="'..(color or '#F07A1F')..'">'..text..'</font>'
 	end
 
 	function console:SetLine(text, color)
@@ -802,51 +886,22 @@ local function createConsole()
 	function console:Ask(question, buttons, timeoutSeconds, fallback)
 		if closed then return fallback end
 		self:SetLine(question)
-		for _, child in answers:GetChildren() do
-			if child:IsA('TextButton') then
-				child:Destroy()
-			end
-		end
+		clearAnswers()
 
 		tooltip.Visible = false
 
 		local choice
 		for index, def in buttons do
-			local button = Instance.new('TextButton')
-			-- keeps the buttons in the order given, ahead of the tooltip that trails them
-			button.LayoutOrder = index
-			button.Size = UDim2.fromOffset(132, 34)
-			button.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
-			button.BorderSizePixel = 0
-			button.AutoButtonColor = false
-			-- Frees the touch cursor so the button is tappable on phones (where input would
-			-- otherwise be locked to the game).
-			button.Modal = true
-			button.Text = def.text
-			button.TextColor3 = Palette.ButtonIdle
-			button.TextSize = 17
-			button.Font = Enum.Font.Code
-			button.Parent = answers
-			local corner = Instance.new('UICorner')
-			corner.CornerRadius = UDim.new(0, 4)
-			corner.Parent = button
-			local stroke = Instance.new('UIStroke')
-			stroke.Color = Palette.ButtonBorder
-			stroke.Thickness = 1
-			stroke.Parent = button
-			button.MouseEnter:Connect(function()
-				stroke.Color = Palette.Accent
-				button.TextColor3 = Palette.Accent
-				if def.tooltip then
+			local button = answerButton(def.text, 132, index)
+			if def.tooltip then
+				button.MouseEnter:Connect(function()
 					tooltip.Text = def.tooltip
 					tooltip.Visible = true
-				end
-			end)
-			button.MouseLeave:Connect(function()
-				stroke.Color = Palette.ButtonBorder
-				button.TextColor3 = Palette.ButtonIdle
-				tooltip.Visible = false
-			end)
+				end)
+				button.MouseLeave:Connect(function()
+					tooltip.Visible = false
+				end)
+			end
 			button.MouseButton1Click:Connect(function()
 				choice = def.key
 			end)
@@ -856,17 +911,129 @@ local function createConsole()
 		local timeout = os.clock() + (timeoutSeconds or 60)
 		repeat task.wait() until choice ~= nil or closed or os.clock() > timeout
 		answers.Visible = false
-		for _, child in answers:GetChildren() do
-			if child:IsA('TextButton') then
-				child:Destroy()
-			end
-		end
+		clearAnswers()
 		tooltip.Visible = false
 		self:SetLine('')
 		if choice == nil then
 			return fallback
 		end
 		return choice
+	end
+
+	-- Key entry, drawn into the console's own question row rather than as a second window: the
+	-- status line above it already reads '< KEY SYSTEM', so the gate looks like one more
+	-- terminal prompt instead of a modal floating over the loader.
+	--
+	-- Every handler is passed `say(message, kind)` and does its own reporting, which keeps all
+	-- LuaArmor knowledge out of the console. onSubmit returns whether the key was accepted;
+	-- anything false leaves the prompt up for another attempt. Returns the accepted key, or nil
+	-- if the window was closed (i.e. the boot was cancelled).
+	--
+	-- Deliberately has NO timeout, unlike Ask(): every boot question has a sane fallback answer,
+	-- and a missing key does not. Waiting forever is correct -- the user is off finishing
+	-- checkpoints in a browser, and the console is what they come back to.
+	function console:AskKey(opts)
+		if closed then return nil end
+		clearAnswers()
+		tooltip.Visible = false
+
+		local function say(message, kind)
+			self:SetLine(message or '', kind == 'err' and Palette.Error or (kind == 'ok' and Palette.Ok or Palette.Line))
+		end
+		say(opts.message, opts.messageKind)
+
+		-- The footer normally explains how to quit; while the gate is up it explains the gate,
+		-- which is the only thing the user needs from it. Restored on the way out.
+		local previousFooter = footer.Text
+		if opts.footer then
+			footer.Text = opts.footer
+		end
+
+		local box = Instance.new('TextBox')
+		box.LayoutOrder = 1
+		box.Size = UDim2.fromOffset(340, 34)
+		box.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+		box.BorderSizePixel = 0
+		box.ClearTextOnFocus = false
+		box.Text = ''
+		box.PlaceholderText = opts.placeholder or ''
+		box.PlaceholderColor3 = Palette.Footer
+		box.TextColor3 = Palette.Line
+		box.TextSize = 16
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.Font = Enum.Font.Code
+		box.Parent = answers
+		local boxCorner = Instance.new('UICorner')
+		boxCorner.CornerRadius = UDim.new(0, 4)
+		boxCorner.Parent = box
+		local boxStroke = Instance.new('UIStroke')
+		boxStroke.Color = Palette.ButtonBorder
+		boxStroke.Thickness = 1
+		boxStroke.Parent = box
+		local boxPadding = Instance.new('UIPadding')
+		boxPadding.PaddingLeft = UDim.new(0, 10)
+		boxPadding.PaddingRight = UDim.new(0, 10)
+		boxPadding.Parent = box
+		box.Focused:Connect(function()
+			boxStroke.Color = Palette.Accent
+		end)
+		box.FocusLost:Connect(function()
+			boxStroke.Color = Palette.ButtonBorder
+		end)
+
+		local accepted
+		-- Guards the window between clicking Submit and the check coming back: check_key is a
+		-- network round trip, and without this a second click would fire a second one.
+		local busy = false
+		local function submit()
+			if busy or closed or accepted then return end
+			busy = true
+			local key = trim(box.Text)
+			if opts.onSubmit(key, say) then
+				accepted = key
+			end
+			busy = false
+		end
+
+		local getKey = answerButton(opts.getKeyText, 140, 2)
+		getKey.MouseButton1Click:Connect(function()
+			opts.onGetKey(say)
+		end)
+
+		-- Only offered when the executor can actually read the clipboard; otherwise the row
+		-- closes up around it and the user pastes with ctrl+v into the box like normal.
+		if opts.onPaste then
+			local paste = answerButton(opts.pasteText, 110, 3)
+			paste.MouseButton1Click:Connect(function()
+				local text = opts.onPaste(say)
+				if text then
+					box.Text = text
+				end
+			end)
+		end
+
+		local submitButton = answerButton(opts.submitText, 130, 4)
+		submitButton.MouseButton1Click:Connect(submit)
+
+		local help = answerButton(opts.helpText, 120, 5)
+		help.MouseButton1Click:Connect(function()
+			opts.onHelp(say)
+		end)
+
+		box.FocusLost:Connect(function(enterPressed)
+			if enterPressed then
+				submit()
+			end
+		end)
+
+		answers.Visible = true
+		repeat task.wait() until accepted or closed
+
+		answers.Visible = false
+		clearAnswers()
+		footer.Text = previousFooter
+		self:SetLine('')
+		return accepted
 	end
 
 	-- Draws whatever rows are still missing, and only once the face is whole flips the header
@@ -923,6 +1090,12 @@ local function createHeadlessConsole()
 	function console:Ask(question, buttons, timeoutSeconds, fallback)
 		return fallback
 	end
+	-- Nobody is watching a headless boot, so there is no one to type a key. A reload that gets
+	-- this far has no saved key that validated, and the caller turns this nil into a clean
+	-- 'run the loader manually' failure rather than hanging on an invisible prompt.
+	function console:AskKey()
+		return nil
+	end
 	return console
 end
 
@@ -933,8 +1106,10 @@ end
 local isReload = shared.vapereload and true or false
 
 local console = isReload and createHeadlessConsole() or createConsole()
-console:SetStatus('INJECTING')
-console:SetLine('Injecting into ROBLOX...')
+-- The key gate is the first thing that runs -- every run, reinjects included -- so the console
+-- opens directly onto it rather than flashing '> INJECTING' for a frame first.
+console:SetStatus('AUTHENTICATING', nil, '<')
+console:SetLine('Checking your key...')
 console:SetProgress(0.08)
 
 -- Executors known not to run pistonware correctly. Checked before anything is downloaded so
@@ -961,9 +1136,283 @@ do
 	end
 end
 
+--[[
+	Step 0: the key gate.
+
+	Nothing past this block runs until a LuaArmor key validates -- no folders are created, no
+	files are downloaded, no config prompts appear, main.lua is never reached, and so neither
+	are guis/*.lua, games/<PlaceId>.lua or games/bedwars.lua. Vape cannot load unkeyed because
+	the code that loads it is on the far side of this block.
+
+	It sits after the unsupported-executor check on purpose: there is no point sending someone
+	through ad checkpoints for a key they could never use.
+]]
+do
+	local httpService = cloneref(game:GetService('HttpService'))
+
+	-- Reads are separate from writes: setclipboard is already resolved at the top of the file,
+	-- but reading needs its own lookup and is missing on more executors than writing is.
+	local canPaste = (getclipboard ~= nil) or (syn ~= nil and syn.read_clipboard ~= nil)
+	local function clipboardGet()
+		local fn = getclipboard or (syn and syn.read_clipboard)
+		if not fn then return nil end
+		local ok, res = pcall(fn)
+		if ok and type(res) == 'string' then return res end
+		return nil
+	end
+	local function clipboardSet(text)
+		if not setclipboard then return false end
+		return (pcall(setclipboard, text))
+	end
+
+	-- pistonwarekey.json lives at the workspace root rather than under pistonware/, so that
+	-- reinstall.lua (and cancelling a first install, which wipes the whole folder) can't cost
+	-- the user a key they already paid checkpoints for.
+	local hasFiles = (isfile and readfile and writefile) and true or false
+	local function readSavedKey()
+		if not hasFiles then return nil end
+		local ok, key = pcall(function()
+			if isfile(KEY_FILE) then
+				local decoded = httpService:JSONDecode(readfile(KEY_FILE))
+				if type(decoded) == 'table' then return decoded.key end
+			end
+			return nil
+		end)
+		return ok and key or nil
+	end
+	local function saveKey(key)
+		if not hasFiles then return end
+		pcall(function()
+			writefile(KEY_FILE, httpService:JSONEncode({key = key, saved = os.time()}))
+		end)
+	end
+	local function deleteSavedKey()
+		pcall(function()
+			if isfile(KEY_FILE) then
+				delfile(KEY_FILE)
+			end
+		end)
+	end
+
+	-- LuaArmor's public SDK, fetched on first use and then reused. Lazy because a reinject in an
+	-- already-authenticated session never calls checkKey, and should not pay an HTTP round trip
+	-- for a library it will not touch. If it fails to come down, every check reports
+	-- UNKNOWN_ERROR and the user gets a readable console line instead of a traceback.
+	local api, apiTried
+	local function getApi()
+		if apiTried then return api end
+		apiTried = true
+		local ok, lib = pcall(function()
+			return loadstring(game:HttpGet('https://sdkapi-public.luarmor.net/library.lua'))()
+		end)
+		if ok and type(lib) == 'table' then
+			api = lib
+			api.script_id = SCRIPT_ID
+		end
+		return api
+	end
+	local function checkKey(key)
+		local lib = getApi()
+		if not lib then
+			return {code = 'UNKNOWN_ERROR', message = t('no_library')}
+		end
+		local ok, status = pcall(function()
+			return lib.check_key(key)
+		end)
+		if ok and type(status) == 'table' then return status end
+		return {code = 'UNKNOWN_ERROR', message = 'check_key request failed.'}
+	end
+
+	-- Publishes the validated key where the protected payload will look for it. The LuaArmor
+	-- build reads the global script_key when it runs, which is much later and in a different
+	-- chunk (main.lua -> games/6872274481.lua -> the GitLab redirect), so the key has to go into
+	-- the shared global environment rather than a local here.
+	--
+	-- Written BOTH ways deliberately, not either/or. On most executors a plain global assignment
+	-- and getgenv() land in the same table, but not on all of them -- and when they diverge the
+	-- failure is LuaArmor reporting 'No key found' for a key that was very much set, which is
+	-- indistinguishable from a wrong key and near-impossible to diagnose from the message. Two
+	-- assignments cost nothing and remove the whole failure class.
+	--
+	-- shared.PistonwareKey is the copy main.lua re-embeds into its queued teleport script:
+	-- globals do not survive a teleport, and the new server re-runs main.lua directly.
+	local function authenticate(key)
+		pcall(function()
+			if getgenv then
+				getgenv().script_key = key
+			end
+		end)
+		script_key = key
+		shared.PistonwareKey = key
+		shared.PistonwareAuthenticated = true
+	end
+
+	-- Authentication is re-derived from a real key on EVERY run, never inherited. shared lives
+	-- for the whole executor session, so trusting a flag found in it would make
+	-- `shared.PistonwareAuthenticated = true` in front of the loadstring a one-line gate skip --
+	-- the exact copy-pasteable bypass that ends up shared around. Clearing it first means the
+	-- only way past this block is a key LuaArmor actually accepts.
+	--
+	-- The cost is one check_key per loader run, including reinjects. That is fine: reinjects are
+	-- deliberate user actions (the reinject button, a theme switch, a profile switch), not
+	-- anything on a hot path, and check_key is the call LuaArmor expects on every script start.
+	shared.PistonwareAuthenticated = nil
+
+	do
+		local reason
+
+		local savedKey = readSavedKey()
+		if savedKey then
+			savedKey = trim(savedKey)
+			if savedKey == '' then savedKey = nil end
+		end
+
+		-- A reinject carries the key it already validated, so the same key gets re-checked
+		-- instead of the user being asked for it again. Anything forged here just fails the
+		-- check below and lands on the prompt. Falls back to the copy on disk.
+		local candidate = shared.PistonwareKey
+		if type(candidate) == 'string' and trim(candidate) ~= '' then
+			candidate = trim(candidate)
+		else
+			candidate = savedKey
+		end
+
+		if candidate then
+			local status = checkKey(candidate)
+			local code = status.code
+			-- Only a key that came off disk is deleted on rejection: a bogus session key must
+			-- not be able to destroy the good one the user has saved.
+			local fromDisk = candidate == savedKey
+			if code == 'KEY_VALID' then
+				authenticate(candidate)
+			elseif code == 'KEY_EXPIRED' then
+				if fromDisk then deleteSavedKey() end
+				reason = t('saved_expired')
+			elseif code == 'KEY_HWID_LOCKED' then
+				if fromDisk then deleteSavedKey() end
+				reason = t('saved_hwid')
+			elseif code == 'KEY_INCORRECT' then
+				if fromDisk then deleteSavedKey() end
+				reason = t('saved_incorrect')
+			elseif code == 'KEY_BANNED' then
+				if fromDisk then deleteSavedKey() end
+				reason = t('saved_banned')
+			end
+			-- UNKNOWN_ERROR / SECURITY_ERROR and friends deliberately keep the file: the key is
+			-- probably fine and LuaArmor (or the network) is not, so a bad minute must not cost
+			-- the user the key they already earned. They just get prompted this once.
+		end
+
+		if not shared.PistonwareAuthenticated then
+			if console:IsAborted() then deleteInstall() return end
+			console:SetStatus('KEY SYSTEM', nil, '<')
+			console:SetProgress(0.1)
+
+			local key = console:AskKey({
+				message = reason or t('enter_key'),
+				messageKind = reason and 'err' or nil,
+				placeholder = t('placeholder'),
+				footer = t('footer'),
+				getKeyText = t('get_key'),
+				pasteText = t('paste'),
+				submitText = t('submit'),
+				helpText = t('need_help'),
+				onGetKey = function(say)
+					if clipboardSet(GETKEY_URL) then
+						say(t('link_copied'))
+					else
+						say(t('copy_failed'), 'err')
+					end
+				end,
+				-- Left nil when the executor cannot read the clipboard, which drops the button
+				-- from the row entirely; ctrl+v into the box still works.
+				onPaste = canPaste and function(say)
+					local clip = clipboardGet()
+					if clip and trim(clip) ~= '' then
+						say(t('pasted'))
+						return trim(clip)
+					end
+					say(t('clipboard_empty'), 'err')
+					return nil
+				end or nil,
+				onHelp = function(say)
+					if clipboardSet(HELP_URL) then
+						say(t('help_copied'))
+					else
+						say(t('copy_failed'), 'err')
+					end
+				end,
+				onSubmit = function(key, say)
+					if key == '' then
+						say(t('empty_key'), 'err')
+						return false
+					end
+					-- Cheap local reject before spending a request on something that cannot be
+					-- a key (usually a half-pasted clipboard).
+					if #key < 8 then
+						say(t('bad_format'), 'err')
+						return false
+					end
+					say(t('checking'))
+					local status = checkKey(key)
+					local code = status.code
+					if code == 'KEY_VALID' then
+						saveKey(key)
+						local extra = ''
+						if type(status.data) == 'table' and status.data.note then
+							extra = ' ('..tostring(status.data.note)..')'
+						end
+						say(t('valid_loading', extra), 'ok')
+						authenticate(key)
+						return true
+					elseif code == 'KEY_HWID_LOCKED' then
+						say(t('hwid_locked'), 'err')
+					elseif code == 'KEY_EXPIRED' then
+						say(t('expired'), 'err')
+					elseif code == 'KEY_BANNED' then
+						say(t('banned'), 'err')
+					elseif code == 'KEY_INCORRECT' then
+						say(t('incorrect'), 'err')
+					elseif code == 'KEY_INVALID' then
+						say(t('invalid_format'), 'err')
+					else
+						say(t('check_failed', tostring(status.message), tostring(code)), 'err')
+					end
+					return false
+				end
+			})
+
+			-- IsAborted() as well as the nil test: closing the window while a check is still in
+			-- flight lets that check land afterwards and set `accepted`, and a cancelled boot
+			-- must not carry on just because the key turned out to be good. The key is still
+			-- saved and the session still counts as authenticated, so the next run skips the
+			-- gate -- cancelling costs the boot, not the key.
+			if not key or console:IsAborted() then
+				-- Window closed, or a headless reload that had no valid saved key to fall back
+				-- on. Nothing has been downloaded or injected at this point, so stopping here
+				-- leaves the session exactly as the loader found it.
+				local message = isReload and t('headless') or t('cancelled')
+				if not console:IsAborted() then
+					console:Fail(message)
+				end
+				-- warn() as well as the console line: a headless reload has no window to read,
+				-- and silently doing nothing is the one outcome nobody can debug.
+				warn('[pistonware] '..message)
+				deleteInstall()
+				return
+			end
+		end
+	end
+
+	-- Authenticated: hand the console back to the boot it was holding up.
+	console:SetStatus('INJECTING')
+	console:SetLine('Injecting into ROBLOX...')
+	console:SetProgress(0.12)
+end
+
 -- Decided before the folders are created, while 'did this run create the install' is still
--- observable. No yield separates this from the console appearing, so a cancel cannot land
--- in between and read the flag before it is set.
+-- observable. The key gate above yields, but it runs before any folder exists and its own
+-- cancel path returns without reaching here, so freshInstall still cannot be read stale.
 freshInstall = not isfolder('pistonware')
 for _, folder in {'pistonware', 'pistonware/games', 'pistonware/profiles', 'pistonware/assets', 'pistonware/libraries', 'pistonware/guis'} do
 	if not isfolder(folder) then
@@ -993,7 +1442,7 @@ if console:IsAborted() then deleteInstall() return end
 -- reloads (the first manual run this session already did it, and reinjects should stay
 -- fast) and for developers (running local edits is the whole point of developer mode --
 -- and their watermark-stripped files would be skipped anyway).
-if not isReload and not shared.PistonwareDeveloper then
+if not isReload and not isDeveloper then
 	console:SetLine('Checking for updates...')
 	pcall(updateCachedFiles, function(completed, total)
 		console:SetLine('Updating files ('..completed..'/'..total..')...')
