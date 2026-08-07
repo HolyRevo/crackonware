@@ -7633,10 +7633,33 @@ local function downloadBedwars()
     return cached
 end
 
+-- LuaArmor blanks the global script_key as soon as it has authenticated -- an anti-key-theft
+-- measure, so another script running later in the same session cannot read it back out. That
+-- makes the key single-use per session, and ANY second load of the payload (the GUI's Reinject
+-- button, a re-run of this file, a manual execute after injecting) lands on 'No key found',
+-- which does not merely fail: LuaArmor puts up a modal Auth Error with a Leave button and never
+-- returns. Everything downstream of the call below is then stranded -- including main.lua's
+-- finishLoading(), which is what applies your saved profile, so the symptom is a GUI that loads
+-- with Profile 'default' and an empty Profiles list rather than an obvious error.
+--
+-- shared.PistonwareKey is the loader's own copy of the validated key and is never blanked, so
+-- re-publishing from it immediately before each load makes the key effectively reusable.
+local function republishKey()
+    local key = shared.PistonwareKey
+    if type(key) ~= 'string' or key == '' then return end
+    pcall(function()
+        if getgenv then
+            getgenv().script_key = key
+        end
+    end)
+    script_key = key
+end
+
 local bedwarsSource = downloadBedwars()
 if bedwarsSource then
     local bedwarsFn = loadstring(bedwarsSource)
     if bedwarsFn then
+        republishKey()
         local ok, err = pcall(bedwarsFn)
         if not ok then
             warn('[pistonware] bedwars.lua errored while running: '..tostring(err))
