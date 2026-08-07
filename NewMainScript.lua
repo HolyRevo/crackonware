@@ -1,3 +1,8 @@
+if not shared.PistonwareAuthenticated then
+	warn('[pistonware] NewMainScript.lua is the old loader and no longer injects on its own -- run loader.lua instead')
+	return
+end
+
 local isfile = isfile or function(file)
 	local suc, res = pcall(function()
 		return readfile(file)
