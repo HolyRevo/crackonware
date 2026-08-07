@@ -209,7 +209,11 @@ local function finishLoading()
 			if shared.VapeSmoothBoot then
 				teleportScript = 'shared.VapeSmoothBoot = true\n'..teleportScript
 			end
-			teleportScript = 'shared.VapeCustomProfile = "'..(vape.Profile or shared.VapeCustomProfile or 'default')..'"\n'..teleportScript
+			-- %q, matching the key above: profile names are user-supplied (the Profiles tab lets
+			-- you name one anything), and a name containing a quote or backslash used to produce
+			-- a chunk that would not compile -- which silently costs the whole re-injection, not
+			-- just the profile.
+			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or shared.VapeCustomProfile or 'default')..'\n'..teleportScript
 			vape:Save()
 			if not hasQueueOnTeleport then
 				vape:CreateNotification('Vape', 'queue_on_teleport is not supported by your executor -- Vape will not re-inject automatically after this teleport (e.g. queueing into a match). You will need to re-run your loadstring manually.', 15, 'alert')
