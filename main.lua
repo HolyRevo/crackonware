@@ -1,3 +1,14 @@
+-- The loader is the only supported entry point: it runs the LuaArmor key gate and publishes
+-- script_key (which the protected bedwars.lua reads) before any of this downloads or executes.
+-- main.lua is re-run directly in two places -- the queued teleport script below, and the GUI's
+-- reinject buttons -- and both re-establish that state first, so reaching here without it means
+-- the gate was skipped. Checked before the uninject below, so a failed check cannot tear down a
+-- working instance on its way out.
+if not shared.PistonwareAuthenticated then
+	warn('[pistonware] not authenticated -- run the pistonware loader and enter your key')
+	return
+end
+
 -- pcall'd: after a teleport shared.vape can still point at the previous server's instance,
 -- whose GUI and connections no longer exist. An error walking that corpse would abort main.lua
 -- on line one and leave the queued re-injection doing nothing at all.
@@ -183,6 +194,15 @@ local function finishLoading()
 					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/main.lua', true), 'main')()
 				end
 			]]
+			-- Globals and shared do not survive a teleport, and the new server re-runs main.lua
+			-- directly rather than the loader -- so the key gate's output has to be re-published
+			-- by hand here. Without it the guard at the top of this file would reject the
+			-- re-injection, and bedwars.lua would be handed to loadstring with no script_key.
+			-- %q so a key containing a quote or backslash still produces a valid chunk.
+			if shared.PistonwareKey then
+				local quoted = string.format('%q', shared.PistonwareKey)
+				teleportScript = 'script_key = '..quoted..'\nshared.PistonwareKey = '..quoted..'\nshared.PistonwareAuthenticated = true\n'..teleportScript
+			end
 			if shared.PistonwareDeveloper then
 				teleportScript = 'shared.PistonwareDeveloper = true\n'..teleportScript
 			end
