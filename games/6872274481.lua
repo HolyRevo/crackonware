@@ -1,3 +1,8 @@
+if not shared.PistonwareAuthenticated then
+	warn('[pistonware] not authenticated -- run the pistonware loader and enter your key')
+	return
+end
+
 local run = function(func) if shared.VapeSmoothBoot then task.wait() end func() end
 
 local cloneref = cloneref or function(obj)
@@ -7549,6 +7554,16 @@ shared.bedwars = {
 -- though it is cached locally under pistonware/games/. It auto-updates: the sha of the latest
 -- commit that touched it is tracked in bedwarscheck.txt; whenever GitLab reports a newer
 -- commit, the file is silently re-downloaded (no prompt) and the sha re-recorded.
+--
+-- What that GitLab file actually contains is a ONE-LINE REDIRECT to LuaArmor's loader endpoint,
+-- not the protected build -- LuaArmor hosts the build itself. So the caching below pins the
+-- redirect, never the payload: the real script is pulled fresh from LuaArmor every time this
+-- runs, which is what keeps security updates and Heartbeat current. The commit tracking still
+-- earns its keep, since it is how a changed redirect (new script id, different obfuscator,
+-- rolled-back build) reaches installs that already cached the old one.
+--
+-- The payload validates the global script_key server-side on execution. The loader's key gate
+-- is what sets it; nothing here can substitute for it.
 
 -- Latest commit sha that touched bedwars.lua on GitLab, or nil on failure.
 -- GitLab's commits API names the sha field 'id' (GitHub/Codeberg call it 'sha').
