@@ -148,6 +148,11 @@ local function prefetchFolder(folder)
 	done:Destroy()
 end
 
+-- False only while a game script is still running past its deadline below. finishLoading needs
+-- it because two things it starts are unsafe until every module has registered: the autosave
+-- loop, and the profile it applies.
+local gameScriptFinished = true
+
 local function finishLoading()
 	vape.Init = nil
 	-- shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
@@ -166,7 +171,24 @@ local function finishLoading()
 	if customProfile then
 		pcall(function() vape:Save() end)
 	end
+	-- A game script that overran its deadline is still registering modules, and those modules
+	-- missed the load above. Re-apply the profile once it finishes, or a slow payload silently
+	-- costs you every setting it owns.
+	if not gameScriptFinished then
+		task.spawn(function()
+			repeat task.wait() until gameScriptFinished or not vape.Loaded
+			if gameScriptFinished and vape.Loaded then
+				pcall(function() vape:Load(true, customProfile) end)
+			end
+		end)
+	end
+
 	task.spawn(function()
+		-- Never autosave while a game script is still registering modules. Save() serialises
+		-- only the modules that exist at that instant, so a save taken early does not merely
+		-- record an incomplete picture -- it overwrites the profile on disk with one that is
+		-- missing every module yet to appear, destroying their saved settings permanently.
+		repeat task.wait() until gameScriptFinished or not vape.Loaded
 		while vape.Loaded do
 			vape:Save()
 			for _ = 1, 10 do
@@ -285,20 +307,23 @@ if not shared.VapeIndependent then
 	local function runGameScript(source, chunkname)
 		local fn = loadstring(source, chunkname)
 		if not fn then return false end
-		local returned = false
+		gameScriptFinished = false
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
-			returned = true
+			gameScriptFinished = true
 			if not ok then
 				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
 			end
 		end)
-		-- Generous: a cold payload download plus its auth round trip is several seconds on a slow
-		-- connection, and cutting that short would drop its modules from the config load.
-		local deadline = os.clock() + 30
-		repeat task.wait() until returned or os.clock() > deadline
-		if not returned then
-			warn('[pistonware] '..chunkname..' has not returned after 30s -- loading the GUI anyway. Modules it registers from here on will not receive their saved settings.')
+		-- Deliberately long. Waiting is the CORRECT behaviour -- the deadline exists only to
+		-- rescue a payload that will never return at all, not to hurry a slow one along. A
+		-- LuaArmor-protected bedwars.lua is 425KB of obfuscated Luau and legitimately takes
+		-- 30-45s to execute, so anything tighter fires during a perfectly healthy boot and
+		-- pushes the run down the degraded path below for no reason.
+		local deadline = os.clock() + 180
+		repeat task.wait() until gameScriptFinished or os.clock() > deadline
+		if not gameScriptFinished then
+			warn('[pistonware] '..chunkname..' has not returned after 180s -- loading the GUI anyway. Your profile will be re-applied automatically if it finishes later.')
 		end
 		return true
 	end
