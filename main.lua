@@ -267,15 +267,49 @@ if not shared.VapeIndependent then
 		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
 	end)
 
+	-- The game script registers this place's modules, and finishLoading() applies your saved
+	-- profile to whatever exists by then -- so waiting for it is correct, and running it on a
+	-- bare task.spawn would race the config load.
+	--
+	-- What it must NOT be is unbounded. pcall traps errors, not a script that never returns, and
+	-- bedwars.lua now executes inside a LuaArmor VM: on a failed key check LuaArmor puts up a
+	-- modal Auth Error and simply never hands control back. That stranded finishLoading()
+	-- entirely -- the GUI came up on profile 'default' with an empty Profiles list while the
+	-- correct profile sat on disk, which reads like a config bug rather than a hung payload.
+	-- With a deadline, a stalled payload costs its modules' saved settings instead of the whole
+	-- injection, and says so.
+	--
+	-- Varargs are packed because '...' is only valid directly in this chunk, never inside the
+	-- nested function the spawn needs.
+	local gameArgs = table.pack(...)
+	local function runGameScript(source, chunkname)
+		local fn = loadstring(source, chunkname)
+		if not fn then return false end
+		local returned = false
+		task.spawn(function()
+			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
+			returned = true
+			if not ok then
+				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
+			end
+		end)
+		-- Generous: a cold payload download plus its auth round trip is several seconds on a slow
+		-- connection, and cutting that short would drop its modules from the config load.
+		local deadline = os.clock() + 30
+		repeat task.wait() until returned or os.clock() > deadline
+		if not returned then
+			warn('[pistonware] '..chunkname..' has not returned after 30s -- loading the GUI anyway. Modules it registers from here on will not receive their saved settings.')
+		end
+		return true
+	end
+
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
 	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
 	-- earlier failed download reads back as "present", and loadstring('') silently does
 	-- nothing -- indistinguishable from the game script never loading at all.
 	local cached = isfile(gamePath) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
-		-- pcall(fn, ...) rather than pcall(function() fn(...) end): '...' is only valid
-		-- directly in this chunk, never inside a nested non-vararg function.
-		pcall(loadstring(cached, tostring(game.PlaceId)), ...)
+		runGameScript(cached, tostring(game.PlaceId))
 	elseif not shared.PistonwareDeveloper then
 		-- Single fetch (the old code requested this URL twice: once to probe, then again
 		-- inside downloadFile) and load straight from the response, so a stale/corrupt
@@ -285,7 +319,7 @@ if not shared.VapeIndependent then
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			pcall(loadstring(res, tostring(game.PlaceId)), ...)
+			runGameScript(res, tostring(game.PlaceId))
 		end
 	end
 	finishLoading()
