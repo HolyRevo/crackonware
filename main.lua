@@ -154,6 +154,11 @@ end
 -- until every module exists: the autosave loop, and the profile it applies.
 local gameScriptFinished = true
 
+-- Set once the profile has been applied against the full module set. Every Save() is gated on
+-- this rather than on gameScriptFinished: a protected payload never sets that flag, so gating
+-- saves on it would mean BedWars never autosaved or persisted a config change at all.
+local profileApplied = false
+
 local function finishLoading()
 	vape.Init = nil
 	-- shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
@@ -188,6 +193,7 @@ local function finishLoading()
 	]]
 	local function applyProfile()
 		vape:Load(nil, customProfile)
+		profileApplied = true
 		-- Persist the applied profile so a reinject before the first autosave tick still comes
 		-- back to the same config.
 		if customProfile then
@@ -205,11 +211,40 @@ local function finishLoading()
 		end)
 	end
 
+	-- A protected payload never hands control back: LuaArmor's VM keeps the thread it was
+	-- invoked on, so for BedWars gameScriptFinished never flips and waiting on it would mean
+	-- never loading a profile at all.
+	--
+	-- What IS observable is the side effect -- modules appearing in vape.Modules. Once that
+	-- count has held steady for a few seconds, everything that is going to register has
+	-- registered, and the profile can be applied once against the complete set. Quiescence is a
+	-- heuristic, but it is the only completion signal a payload that never returns can give us,
+	-- and it degrades safely: worst case a late module misses its settings, which is what
+	-- happened before any of this existed.
+	local function waitForModules()
+		if gameScriptFinished then return end
+		local started = os.clock()
+		local previous, steady = -1, 0
+		repeat
+			task.wait(0.25)
+			local count = 0
+			for _ in vape.Modules do count += 1 end
+			if count > 0 and count == previous then
+				steady += 1
+			else
+				steady, previous = 0, count
+			end
+			-- 3s of no new modules, or a hard backstop so a genuinely stuck payload still ends
+			-- up with a loaded config rather than none.
+		until gameScriptFinished or steady >= 12 or os.clock() - started > 120
+		warn(('[pistonware] %d modules registered in %.1fs -- applying profile'):format(previous, os.clock() - started))
+	end
+
 	if gameScriptFinished then
 		applyProfile()
 	else
 		task.spawn(function()
-			repeat task.wait() until gameScriptFinished
+			waitForModules()
 			applyProfile()
 		end)
 	end
@@ -255,11 +290,12 @@ local function finishLoading()
 			-- queueing before the payload has finished means vape.Profile is not set yet, and
 			-- without this the next server would be told to load 'default'.
 			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or customProfile or 'default')..'\n'..teleportScript
-			-- Same rule as everywhere else: saving before the payload has registered its modules
-			-- would write a profile missing all of them. Queueing straight into a match is
-			-- exactly when that happens, so skip the save rather than corrupt the config -- the
-			-- profile on disk is already correct, there is simply nothing new worth recording.
-			if gameScriptFinished then
+			-- Same rule as everywhere else: saving before the profile has been applied against the
+			-- full module set would write one missing every module still to appear. Queueing
+			-- straight into a match is exactly when that happens, so skip the save rather than
+			-- corrupt the config -- what is on disk is already correct, there is simply nothing
+			-- new worth recording yet.
+			if profileApplied then
 				vape:Save()
 			end
 			if not hasQueueOnTeleport then
