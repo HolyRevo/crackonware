@@ -7644,22 +7644,35 @@ end
 --
 -- shared.PistonwareKey is the loader's own copy of the validated key and is never blanked, so
 -- re-publishing from it immediately before each load makes the key effectively reusable.
+-- Written to every table the payload might read it from, not just one. Executors do not agree
+-- on what a loadstring'd chunk's environment is: on most, a bare global assignment lands in
+-- getgenv(), but several mobile executors sandbox chunks so that the two are different tables,
+-- and _G is different again. Whichever one the payload looks at has to have the key in it, and
+-- writing all three costs nothing. Returns false when there is no key to publish.
 local function republishKey()
     local key = shared.PistonwareKey
-    if type(key) ~= 'string' or key == '' then return end
-    pcall(function()
-        if getgenv then
-            getgenv().script_key = key
-        end
-    end)
+    if type(key) ~= 'string' or key == '' then return false end
     script_key = key
+    pcall(function() getgenv().script_key = key end)
+    pcall(function() _G.script_key = key end)
+    return true
 end
 
 local bedwarsSource = downloadBedwars()
 if bedwarsSource then
     local bedwarsFn = loadstring(bedwarsSource)
     if bedwarsFn then
-        republishKey()
+        -- Refuse to run the payload with no key rather than let it discover that itself: a
+        -- LuaArmor auth failure is not a soft error, it puts up a modal and KICKS the player
+        -- out of the game. Saying so here costs them their combat modules for the round instead
+        -- of their session, and names the actual problem.
+        if not republishKey() then
+            warn('[pistonware] no key available to hand bedwars.lua -- skipping it rather than risk a kick. Re-run the pistonware loader.')
+            pcall(function()
+                vape:CreateNotification('Vape', 'Your key was not available when combat modules tried to load, so they were skipped. Re-run the pistonware loader to fix this.', 30, 'alert')
+            end)
+            return
+        end
         local ok, err = pcall(bedwarsFn)
         if not ok then
             warn('[pistonware] bedwars.lua errored while running: '..tostring(err))
