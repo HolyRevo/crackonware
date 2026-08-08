@@ -148,6 +148,11 @@ local function prefetchFolder(folder)
 	done:Destroy()
 end
 
+-- False while a game script is still running past the deadline in runGameScript below.
+-- finishLoading needs it because two things it starts are unsafe until every module has
+-- registered: the autosave loop, and the profile it applies.
+local gameScriptFinished = true
+
 local function finishLoading()
 	vape.Init = nil
 	-- shared.VapeCustomProfile is a ONE-SHOT hint for the load that immediately follows
@@ -166,13 +171,26 @@ local function finishLoading()
 	if customProfile then
 		pcall(function() vape:Save() end)
 	end
-	-- finishLoading is only ever reached after the game script has finished, which is what makes
-	-- autosaving safe here: Save() serialises only the modules that exist at that instant, so a
-	-- save taken while a game script were still registering would not merely record an
-	-- incomplete picture -- it would overwrite the profile on disk with one missing every module
-	-- yet to appear, destroying those settings permanently. Anything that makes the game script
-	-- run concurrently with this has to solve that first.
+	-- The game script overran its deadline and is still registering modules, so those modules
+	-- missed the load above and are sitting on defaults. Re-apply the profile once it finishes,
+	-- otherwise a slow payload permanently costs you every setting it owns.
+	if not gameScriptFinished then
+		task.spawn(function()
+			repeat task.wait() until gameScriptFinished or not vape.Loaded
+			if gameScriptFinished and vape.Loaded then
+				pcall(function() vape:Load(true, customProfile) end)
+			end
+		end)
+	end
+
 	task.spawn(function()
+		-- Never autosave while a game script is still registering modules. Save() serialises
+		-- only the modules that exist at that instant, so a save taken early does not merely
+		-- record an incomplete picture -- it overwrites the profile on disk with one missing
+		-- every module yet to appear, destroying those settings permanently. With the deadline
+		-- below this is a live risk, not a theoretical one: the GUI loads at 30s while a 40s
+		-- payload is still registering, and the first autosave tick lands 10s later.
+		repeat task.wait() until gameScriptFinished or not vape.Loaded
 		while vape.Loaded do
 			vape:Save()
 			for _ = 1, 10 do
@@ -273,24 +291,44 @@ if not shared.VapeIndependent then
 		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
 	end)
 
+	-- The game script registers this place's modules, and finishLoading() applies your saved
+	-- profile to whatever exists by then -- so waiting for it is correct.
+	--
+	-- What it must not be is unbounded. pcall traps errors, not a script that never returns, and
+	-- bedwars.lua runs inside a LuaArmor VM: on a failed key check LuaArmor puts up a modal Auth
+	-- Error and never hands control back. Unbounded, that stranded finishLoading() entirely --
+	-- the GUI never appeared at all. With a deadline the worst case is a GUI on default settings
+	-- plus a warning, and the re-apply in finishLoading recovers the settings if the payload
+	-- does eventually finish.
+	--
+	-- Varargs are packed because '...' is only valid directly in this chunk, never inside the
+	-- nested function the spawn needs.
+	local gameArgs = table.pack(...)
+	local function runGameScript(source, chunkname)
+		local fn = loadstring(source, chunkname)
+		if not fn then return end
+		gameScriptFinished = false
+		task.spawn(function()
+			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
+			gameScriptFinished = true
+			if not ok then
+				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
+			end
+		end)
+		local deadline = os.clock() + 30
+		repeat task.wait() until gameScriptFinished or os.clock() > deadline
+		if not gameScriptFinished then
+			warn('[pistonware] '..chunkname..' has not returned after 30s -- loading the GUI now. Your profile will be re-applied automatically when it finishes.')
+		end
+	end
+
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
 	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
 	-- earlier failed download reads back as "present", and loadstring('') silently does
 	-- nothing -- indistinguishable from the game script never loading at all.
-	--
-	-- Called straight, on THIS thread, and waited on for as long as it takes. bedwars.lua now
-	-- runs inside a LuaArmor VM and legitimately takes 30-45s, which is slow but correct --
-	-- finishLoading() has to come after it, because that is what applies your saved profile to
-	-- the modules it registers. An earlier attempt ran this on a task.spawn with a deadline, to
-	-- rescue a payload that never returns; it was the wrong trade. The protected VM is sensitive
-	-- to the thread it is invoked from, and half-loading is actively destructive (see the
-	-- autosave note in finishLoading). A slow boot that ends up correct beats a fast one that
-	-- silently drops settings.
 	local cached = isfile(gamePath) and readfile(gamePath) or nil
 	if cached and cached:gsub('%s', '') ~= '' then
-		-- pcall(fn, ...) rather than pcall(function() fn(...) end): '...' is only valid
-		-- directly in this chunk, never inside a nested non-vararg function.
-		pcall(loadstring(cached, tostring(game.PlaceId)), ...)
+		runGameScript(cached, tostring(game.PlaceId))
 	elseif not shared.PistonwareDeveloper then
 		-- Single fetch (the old code requested this URL twice: once to probe, then again
 		-- inside downloadFile) and load straight from the response, so a stale/corrupt
@@ -300,7 +338,7 @@ if not shared.VapeIndependent then
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
-			pcall(loadstring(res, tostring(game.PlaceId)), ...)
+			runGameScript(res, tostring(game.PlaceId))
 		end
 	end
 	finishLoading()
