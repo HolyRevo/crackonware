@@ -248,6 +248,9 @@ local function updateCachedFiles(onProgress)
 		return readfile(localPath):sub(1, #Watermark) == Watermark
 	end
 
+	-- Only files already cached get refreshed here -- everything else keeps downloading on
+	-- demand, and is picked up by this pass on the session after it first appears.
+	local toUpdate = {}
 	for path, sha in remote do
 		local localPath = 'pistonware/'..path
 		if manifest[path] ~= sha and managed(localPath) then
