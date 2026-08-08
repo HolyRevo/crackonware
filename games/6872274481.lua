@@ -7584,8 +7584,8 @@ end
 -- 504s and eventually a full outage), hence the retries; the download is pinned to the exact
 -- commit sha so a fetch right after a push can't grab a stale CDN copy of the branch head.
 local function downloadBedwars()
-    local path = 'pistonware/games/bedwars.lua'
-    local checkPath = 'pistonware/games/bedwarscheck.txt'
+    --local path = 'pistonware/games/bedwars.lua'
+    --local checkPath = 'pistonware/games/bedwarscheck.txt'
 
     local cached = isfile(path) and readfile(path) or nil
     if cached and cached:gsub('%s', '') == '' then cached = nil end
@@ -7597,22 +7597,16 @@ local function downloadBedwars()
     end
 
     local latest = fetchBedwarsCommit()
-    local stored = isfile(checkPath) and readfile(checkPath):gsub('%s', '') or nil
+    --local stored = isfile(checkPath) and readfile(checkPath):gsub('%s', '') or nil
 
     -- Up to date, or the commit couldn't be fetched (don't wipe a good cache we can't verify):
     -- use what we already have.
-    if cached and (not latest or latest == stored) then
-        return cached
-    end
+    --if cached and (not latest or latest == stored) then
+    --  return cached
+    --end
 
     -- No cache, or a newer commit exists -> (re)download and record the new sha.
     for attempt = 1, 4 do
-        local suc, res = pcall(function()
-            local url = latest
-                and ('https://gitlab.com/pistonware/pistonware/-/raw/'..latest..'/bedwars.lua')
-                or 'https://gitlab.com/pistonware/pistonware/-/raw/main/bedwars.lua'
-            return game:HttpGet(url, true)
-        end)
         -- loadstring compile check: during a host outage HttpGet can hand back the 503/error
         -- page as the body, which the ~=''/'404' checks accept -- caching that poisons the
         -- install silently forever (cache-first means it would never be refetched).
@@ -7667,11 +7661,6 @@ if bedwarsSource then
         -- out of the game. Saying so here costs them their combat modules for the round instead
         -- of their session, and names the actual problem.
         if not republishKey() then
-            warn('[pistonware] no key available to hand bedwars.lua -- skipping it rather than risk a kick. Re-run the pistonware loader.')
-            pcall(function()
-                vape:CreateNotification('Vape', 'Your key was not available when combat modules tried to load, so they were skipped. Re-run the pistonware loader to fix this.', 30, 'alert')
-            end)
-            return
         end
         local ok, err = pcall(bedwarsFn)
         if not ok then
