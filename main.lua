@@ -391,6 +391,25 @@ if not shared.VapeIndependent then
 		-- from the previous injection would tell waitForModules the payload had already finished
 		-- before it had even started re-registering.
 		shared.PistonwareBedwarsLoaded = nil
+
+		-- Re-publish the key immediately before the game script runs. LuaArmor blanks the global
+		-- script_key once it has authenticated, so it is single-use per session and any later
+		-- load finds nothing -- which is not a soft failure, it kicks the player.
+		--
+		-- games/6872274481.lua does this too, closer to the payload, but that file is CACHED:
+		-- anyone still holding a copy from before it gained that call would never get it. This
+		-- file is the one that is reliably current, so the safety net belongs here as well.
+		--
+		-- Written to all three tables because executors disagree on what a loadstring'd chunk's
+		-- environment is -- on several mobile executors a bare global, getgenv() and _G are
+		-- genuinely different tables, and the payload only reads one of them.
+		if type(shared.PistonwareKey) == 'string' and shared.PistonwareKey ~= '' then
+			local key = shared.PistonwareKey
+			script_key = key
+			pcall(function() getgenv().script_key = key end)
+			pcall(function() _G.script_key = key end)
+		end
+
 		local started = os.clock()
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
