@@ -308,13 +308,24 @@ if not shared.VapeIndependent then
 		local fn = loadstring(source, chunkname)
 		if not fn then return end
 		gameScriptFinished = false
+		local started = os.clock()
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
 			gameScriptFinished = true
+			-- Reported whenever it is slow enough to matter, so the deadline below can be a
+			-- measurement rather than a guess. A LuaArmor-protected payload is interpreted
+			-- rather than run natively, so this is the number that says whether the wait is
+			-- the VM being slow or the payload never finishing at all.
+			local elapsed = os.clock() - started
+			if elapsed > 5 then
+				warn(('[pistonware] %s finished in %.1fs'):format(chunkname, elapsed))
+			end
 			if not ok then
 				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
 			end
 		end)
+		-- Arbitrary, and deliberately so: it is a giving-up point, not an estimate of how long
+		-- the payload needs. Tune it against the 'finished in Xs' line above.
 		local deadline = os.clock() + 30
 		repeat task.wait() until gameScriptFinished or os.clock() > deadline
 		if not gameScriptFinished then
