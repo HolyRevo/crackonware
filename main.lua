@@ -224,20 +224,34 @@ local function finishLoading()
 	local function waitForModules()
 		if gameScriptFinished then return end
 		local started = os.clock()
-		local previous, steady = -1, 0
+		local previous, sinceChange, longestGap = -1, 0, 0
 		repeat
 			task.wait(0.25)
+			sinceChange += 0.25
 			local count = 0
 			for _ in vape.Modules do count += 1 end
-			if count > 0 and count == previous then
-				steady += 1
-			else
-				steady, previous = 0, count
+			if count ~= previous then
+				-- How far apart registrations actually are on THIS device, which is the number
+				-- the quiet window below has to beat.
+				if previous >= 0 and sinceChange > longestGap then
+					longestGap = sinceChange
+				end
+				previous, sinceChange = count, 0
 			end
-			-- 3s of no new modules, or a hard backstop so a genuinely stuck payload still ends
-			-- up with a loaded config rather than none.
-		until gameScriptFinished or steady >= 12 or os.clock() - started > 120
-		warn(('[pistonware] %d modules registered in %.1fs -- applying profile'):format(previous, os.clock() - started))
+			-- Quiet for comfortably longer than the widest gap seen so far, floor of 3s. Fixed
+			-- windows do not survive slow hardware: on mobile the pauses between registrations
+			-- alone exceeded 3s, so a fixed window called the payload finished halfway through
+			-- it. This scales itself to whatever the device is doing.
+			local quietEnough = math.max(3, longestGap * 2.5)
+		until shared.PistonwareBedwarsLoaded
+			or gameScriptFinished
+			or sinceChange >= quietEnough
+			or os.clock() - started > 180
+		warn(('[pistonware] %d modules in %.1fs (%s) -- applying profile'):format(
+			previous,
+			os.clock() - started,
+			shared.PistonwareBedwarsLoaded and 'payload signalled' or 'went quiet'
+		))
 	end
 
 	if gameScriptFinished then
@@ -373,6 +387,10 @@ if not shared.VapeIndependent then
 		local fn = loadstring(source, chunkname)
 		if not fn then return end
 		gameScriptFinished = false
+		-- Cleared per run, not just per session: shared survives a reinject, and a leftover true
+		-- from the previous injection would tell waitForModules the payload had already finished
+		-- before it had even started re-registering.
+		shared.PistonwareBedwarsLoaded = nil
 		local started = os.clock()
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
