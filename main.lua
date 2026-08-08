@@ -271,11 +271,11 @@ local function finishLoading()
 			-- comes back reliably; the loader still runs on a manual execute.
 			local teleportScript = [[
 				shared.vapereload = true
-				local cached = isfile and isfile('pistonware/main.lua') and readfile('pistonware/main.lua')
+				local cached = isfile and isfile('crackonware/main.lua') and readfile('crackonware/main.lua')
 				if cached and cached ~= '' then
 					loadstring(cached, 'main')()
 				else
-					loadstring(game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/main.lua', true), 'main')()
+					loadstring(game:HttpGet('https://raw.githubusercontent.com/HolyRevo/crackonware/main/main.lua', true), 'main')()
 				end
 			]]
 			-- Globals and shared do not survive a teleport, and the new server re-runs main.lua
@@ -283,10 +283,6 @@ local function finishLoading()
 			-- by hand here. Without it the guard at the top of this file would reject the
 			-- re-injection, and bedwars.lua would be handed to loadstring with no script_key.
 			-- %q so a key containing a quote or backslash still produces a valid chunk.
-			if shared.PistonwareKey then
-				local quoted = string.format('%q', shared.PistonwareKey)
-				teleportScript = 'script_key = '..quoted..'\nshared.PistonwareKey = '..quoted..'\nshared.PistonwareAuthenticated = true\n'..teleportScript
-			end
 			if shared.PistonwareDeveloper then
 				teleportScript = 'shared.PistonwareDeveloper = true\n'..teleportScript
 			end
@@ -424,7 +420,7 @@ if not shared.VapeIndependent then
 		end)
 	end
 
-	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
+	local gamePath = 'crackonware/games/'..game.PlaceId..'.lua'
 	-- A cached-but-empty file is treated as missing and refetched: a truncated write from an
 	-- earlier failed download reads back as "present", and loadstring('') silently does
 	-- nothing -- indistinguishable from the game script never loading at all.
@@ -436,7 +432,7 @@ if not shared.VapeIndependent then
 		-- inside downloadFile) and load straight from the response, so a stale/corrupt
 		-- cache file can't shadow what we just downloaded.
 		local suc, res = pcall(function()
-			return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/games/'..game.PlaceId..'.lua', true)
+			return game:HttpGet('https://raw.githubusercontent.com/HolyRevo/crackonware/main/games/'..game.PlaceId..'.lua', true)
 		end)
 		if suc and res and res ~= '' and res ~= '404: Not Found' then
 			pcall(writefile, gamePath, '--This watermark is used to delete the file if its cached, remove it to make the file persist after vape updates.\n'..res)
