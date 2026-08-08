@@ -1237,12 +1237,9 @@ do
 	-- shared.PistonwareKey is the copy main.lua re-embeds into its queued teleport script:
 	-- globals do not survive a teleport, and the new server re-runs main.lua directly.
 	local function authenticate(key)
-		pcall(function()
-			if getgenv then
-				getgenv().script_key = key
-			end
-		end)
 		script_key = key
+		pcall(function() getgenv().script_key = key end)
+		pcall(function() _G.script_key = key end)
 		shared.PistonwareKey = key
 		shared.PistonwareAuthenticated = true
 	end
