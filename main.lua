@@ -166,50 +166,53 @@ local function finishLoading()
 	local customProfile = shared.VapeCustomProfile
 	shared.VapeCustomProfile = nil
 	if customProfile == '' then customProfile = nil end
-	vape:Load(nil, customProfile)
 
-	-- Persists the applied profile so a reinject before the first autosave tick comes back to
-	-- the same config. This MUST NOT run while a game script is still registering: Save()
-	-- serialises the module list as it stands, so an early call overwrites the profile on disk
-	-- with one missing every module yet to appear -- silently destroying those settings, and
-	-- leaving the re-apply below reading a file that no longer contains them.
-	local function persistProfile()
-		if not customProfile then return end
-		pcall(function() vape:Save() end)
-	end
+	--[[
+		The profile is applied EXACTLY ONCE, and only after every module exists.
 
-	if gameScriptFinished then
-		persistProfile()
-	else
-		-- A slow game script (in practice bedwars.lua inside its LuaArmor VM) is still
-		-- registering, so its modules missed the load above and are sitting on defaults. Wait
-		-- for it, hand them their saved settings, and only then write anything back.
+		Loading it early and re-applying afterwards was tried and is wrong in both directions.
+		Too early and the payload's modules do not exist yet, so they load on defaults; and the
+		second pass needed to fix that would happily overwrite anything you had changed by hand
+		in the meantime -- a toggle flipped at 10s silently reverting at 30s is a far worse bug
+		than a config that arrives late. One load, once everything is registered, is the only
+		version that cannot fight the user.
+
+		Save() has the same constraint from the other side: it serialises the module list as it
+		stands, so any save taken before the payload finishes writes a profile missing every
+		module yet to appear -- destroying those settings on disk. Both the initial save and the
+		autosave loop therefore sit behind the same wait.
+
+		A normal game script has already finished by the time we get here (task.spawn runs it
+		inline until it yields, and only bedwars.lua yields), so this whole block runs
+		synchronously and behaves exactly as it always did.
+	]]
+	local function applyProfile()
+		vape:Load(nil, customProfile)
+		-- Persist the applied profile so a reinject before the first autosave tick still comes
+		-- back to the same config.
+		if customProfile then
+			pcall(function() vape:Save() end)
+		end
+		-- Only now is autosaving safe, and only now is there a profile worth saving.
 		task.spawn(function()
-			repeat task.wait() until gameScriptFinished or not vape.Loaded
-			if gameScriptFinished and vape.Loaded then
-				pcall(function() vape:Load(true, customProfile) end)
-				persistProfile()
+			while vape.Loaded do
+				vape:Save()
+				for _ = 1, 10 do
+					task.wait(1)
+					if not vape.Loaded then break end
+				end
 			end
 		end)
 	end
 
-	task.spawn(function()
-		-- Never autosave while a game script is still registering modules. Save() serialises
-		-- only the modules that exist at that instant, so a save taken early does not merely
-		-- record an incomplete picture -- it overwrites the profile on disk with one missing
-		-- every module yet to appear, destroying those settings permanently. Now that the GUI
-		-- loads without waiting for the payload, this is a live risk rather than a theoretical
-		-- one: the first autosave tick would otherwise land ~10s in, while bedwars.lua still has
-		-- 20s of registering left to do.
-		repeat task.wait() until gameScriptFinished or not vape.Loaded
-		while vape.Loaded do
-			vape:Save()
-			for _ = 1, 10 do
-				task.wait(1)
-				if not vape.Loaded then break end
-			end
-		end
-	end)
+	if gameScriptFinished then
+		applyProfile()
+	else
+		task.spawn(function()
+			repeat task.wait() until gameScriptFinished
+			applyProfile()
+		end)
+	end
 
 	local teleportedServers
 	vape:Clean(playersService.LocalPlayer.OnTeleport:Connect(function()
@@ -248,8 +251,17 @@ local function finishLoading()
 			-- you name one anything), and a name containing a quote or backslash used to produce
 			-- a chunk that would not compile -- which silently costs the whole re-injection, not
 			-- just the profile.
-			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or shared.VapeCustomProfile or 'default')..'\n'..teleportScript
-			vape:Save()
+			-- customProfile is the fallback rather than shared.VapeCustomProfile (cleared above):
+			-- queueing before the payload has finished means vape.Profile is not set yet, and
+			-- without this the next server would be told to load 'default'.
+			teleportScript = 'shared.VapeCustomProfile = '..string.format('%q', vape.Profile or customProfile or 'default')..'\n'..teleportScript
+			-- Same rule as everywhere else: saving before the payload has registered its modules
+			-- would write a profile missing all of them. Queueing straight into a match is
+			-- exactly when that happens, so skip the save rather than corrupt the config -- the
+			-- profile on disk is already correct, there is simply nothing new worth recording.
+			if gameScriptFinished then
+				vape:Save()
+			end
 			if not hasQueueOnTeleport then
 				vape:CreateNotification('Vape', 'queue_on_teleport is not supported by your executor -- Vape will not re-inject automatically after this teleport (e.g. queueing into a match). You will need to re-run your loadstring manually.', 15, 'alert')
 			end
