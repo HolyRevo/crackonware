@@ -148,9 +148,10 @@ local function prefetchFolder(folder)
 	done:Destroy()
 end
 
--- False while a game script is still running past the deadline in runGameScript below.
--- finishLoading needs it because two things it starts are unsafe until every module has
--- registered: the autosave loop, and the profile it applies.
+-- False while a game script is still registering its modules on its own thread. A fast game
+-- script sets this back to true before runGameScript even returns, so the common path never
+-- observes it as false. finishLoading needs it because two of the things it starts are unsafe
+-- until every module exists: the autosave loop, and the profile it applies.
 local gameScriptFinished = true
 
 local function finishLoading()
@@ -171,9 +172,10 @@ local function finishLoading()
 	if customProfile then
 		pcall(function() vape:Save() end)
 	end
-	-- The game script overran its deadline and is still registering modules, so those modules
-	-- missed the load above and are sitting on defaults. Re-apply the profile once it finishes,
-	-- otherwise a slow payload permanently costs you every setting it owns.
+	-- A slow game script (in practice: bedwars.lua inside its LuaArmor VM) is still registering
+	-- modules, so those modules missed the load above and are sitting on defaults. Re-apply the
+	-- profile once it finishes, otherwise a slow payload permanently costs you every setting it
+	-- owns. Skipped entirely for a normal game script, which finished before we got here.
 	if not gameScriptFinished then
 		task.spawn(function()
 			repeat task.wait() until gameScriptFinished or not vape.Loaded
@@ -187,9 +189,10 @@ local function finishLoading()
 		-- Never autosave while a game script is still registering modules. Save() serialises
 		-- only the modules that exist at that instant, so a save taken early does not merely
 		-- record an incomplete picture -- it overwrites the profile on disk with one missing
-		-- every module yet to appear, destroying those settings permanently. With the deadline
-		-- below this is a live risk, not a theoretical one: the GUI loads at 30s while a 40s
-		-- payload is still registering, and the first autosave tick lands 10s later.
+		-- every module yet to appear, destroying those settings permanently. Now that the GUI
+		-- loads without waiting for the payload, this is a live risk rather than a theoretical
+		-- one: the first autosave tick would otherwise land ~10s in, while bedwars.lua still has
+		-- 20s of registering left to do.
 		repeat task.wait() until gameScriptFinished or not vape.Loaded
 		while vape.Loaded do
 			vape:Save()
@@ -291,15 +294,21 @@ if not shared.VapeIndependent then
 		loadstring(downloadFile('pistonware/games/universal.lua'), 'universal')()
 	end)
 
-	-- The game script registers this place's modules, and finishLoading() applies your saved
-	-- profile to whatever exists by then -- so waiting for it is correct.
+	-- Started, never waited on. There is no deadline here by design: a deadline would only be a
+	-- guess at how long the payload needs, and whatever number it held would become the time
+	-- your profile takes to load. Nothing below depends on this having finished -- finishLoading
+	-- applies your profile to the modules that exist now, and re-applies it the moment the rest
+	-- register (see finishLoading).
 	--
-	-- What it must not be is unbounded. pcall traps errors, not a script that never returns, and
-	-- bedwars.lua runs inside a LuaArmor VM: on a failed key check LuaArmor puts up a modal Auth
-	-- Error and never hands control back. Unbounded, that stranded finishLoading() entirely --
-	-- the GUI never appeared at all. With a deadline the worst case is a GUI on default settings
-	-- plus a warning, and the re-apply in finishLoading recovers the settings if the payload
-	-- does eventually finish.
+	-- This costs nothing for a normal game script: task.spawn runs the function inline until it
+	-- yields, so anything that registers its modules without yielding -- which is every game
+	-- file except BedWars -- has already set gameScriptFinished before we get past this line,
+	-- and finishLoading takes the single-pass path exactly as it always did.
+	--
+	-- BedWars is the exception. bedwars.lua is 425KB interpreted by a LuaArmor VM and takes
+	-- ~30s, and none of its modules can exist until it finishes -- that part is not fixable from
+	-- here. What it must not do is hold up the GUI, the universal modules and your config, none
+	-- of which have anything to do with it.
 	--
 	-- Varargs are packed because '...' is only valid directly in this chunk, never inside the
 	-- nested function the spawn needs.
@@ -312,25 +321,17 @@ if not shared.VapeIndependent then
 		task.spawn(function()
 			local ok, err = pcall(fn, table.unpack(gameArgs, 1, gameArgs.n))
 			gameScriptFinished = true
-			-- Reported whenever it is slow enough to matter, so the deadline below can be a
-			-- measurement rather than a guess. A LuaArmor-protected payload is interpreted
-			-- rather than run natively, so this is the number that says whether the wait is
-			-- the VM being slow or the payload never finishing at all.
+			-- Only for a payload slow enough that the split-load path actually engaged; a normal
+			-- game script never trips it. Keeps the real cost of protecting bedwars.lua visible
+			-- instead of guessed at.
 			local elapsed = os.clock() - started
 			if elapsed > 5 then
-				warn(('[pistonware] %s finished in %.1fs'):format(chunkname, elapsed))
+				warn(('[pistonware] %s finished in %.1fs -- its modules now have their saved settings'):format(chunkname, elapsed))
 			end
 			if not ok then
 				warn('[pistonware] '..chunkname..' errored: '..tostring(err))
 			end
 		end)
-		-- Arbitrary, and deliberately so: it is a giving-up point, not an estimate of how long
-		-- the payload needs. Tune it against the 'finished in Xs' line above.
-		local deadline = os.clock() + 30
-		repeat task.wait() until gameScriptFinished or os.clock() > deadline
-		if not gameScriptFinished then
-			warn('[pistonware] '..chunkname..' has not returned after 30s -- loading the GUI now. Your profile will be re-applied automatically when it finishes.')
-		end
 	end
 
 	local gamePath = 'pistonware/games/'..game.PlaceId..'.lua'
