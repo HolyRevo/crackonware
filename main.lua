@@ -167,20 +167,28 @@ local function finishLoading()
 	shared.VapeCustomProfile = nil
 	if customProfile == '' then customProfile = nil end
 	vape:Load(nil, customProfile)
-	-- Persist the applied profile to gui.txt right away so a reinject before the first
-	-- autosave tick still comes back to the same config.
-	if customProfile then
+
+	-- Persists the applied profile so a reinject before the first autosave tick comes back to
+	-- the same config. This MUST NOT run while a game script is still registering: Save()
+	-- serialises the module list as it stands, so an early call overwrites the profile on disk
+	-- with one missing every module yet to appear -- silently destroying those settings, and
+	-- leaving the re-apply below reading a file that no longer contains them.
+	local function persistProfile()
+		if not customProfile then return end
 		pcall(function() vape:Save() end)
 	end
-	-- A slow game script (in practice: bedwars.lua inside its LuaArmor VM) is still registering
-	-- modules, so those modules missed the load above and are sitting on defaults. Re-apply the
-	-- profile once it finishes, otherwise a slow payload permanently costs you every setting it
-	-- owns. Skipped entirely for a normal game script, which finished before we got here.
-	if not gameScriptFinished then
+
+	if gameScriptFinished then
+		persistProfile()
+	else
+		-- A slow game script (in practice bedwars.lua inside its LuaArmor VM) is still
+		-- registering, so its modules missed the load above and are sitting on defaults. Wait
+		-- for it, hand them their saved settings, and only then write anything back.
 		task.spawn(function()
 			repeat task.wait() until gameScriptFinished or not vape.Loaded
 			if gameScriptFinished and vape.Loaded then
 				pcall(function() vape:Load(true, customProfile) end)
+				persistProfile()
 			end
 		end)
 	end
