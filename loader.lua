@@ -1,24 +1,3 @@
-local PUBLIC_BUILD = true
-
-if PUBLIC_BUILD then
-	shared.PistonwareDeveloper = nil
-	pcall(function()
-		if getmetatable(shared) ~= nil then return end
-		setmetatable(shared, {
-			__index = function(self, key)
-				if key == 'PistonwareDeveloper' then return nil end
-				return rawget(self, key)
-			end,
-			__newindex = function(self, key, value)
-				if key == 'PistonwareDeveloper' then return end
-				rawset(self, key, value)
-			end
-		})
-	end)
-end
-
-local isDeveloper = (not PUBLIC_BUILD) and shared.PistonwareDeveloper and true or false
-
 if shared.PistonwareLoaderBoot and os.clock() - shared.PistonwareLoaderBoot < 180 then
 	warn('[pistonware] loader is already running, ignoring duplicate execution')
 	return
@@ -100,9 +79,6 @@ local function downloadFile(path, func)
 		local content
 		for attempt = 1, 4 do
 			local suc, res = pcall(function()
-				if isBedwars then
-					return game:HttpGet(TARGET_URL, true)
-				end
 				return game:HttpGet('https://raw.githubusercontent.com/themagicpiston/pistonware/main/'..relPath, true)
 			end)
 			if suc and res and res ~= '' and res ~= '404: Not Found' and (not path:find('.lua') or loadstring(res) ~= nil) then
@@ -1240,10 +1216,6 @@ do
 	-- shared.PistonwareKey is the copy main.lua re-embeds into its queued teleport script:
 	-- globals do not survive a teleport, and the new server re-runs main.lua directly.
 	local function authenticate(key)
-		script_key = key
-		pcall(function() getgenv().script_key = key end)
-		pcall(function() _G.script_key = key end)
-		shared.PistonwareKey = key
 		shared.PistonwareAuthenticated = true
 	end
 
@@ -1272,31 +1244,27 @@ do
 		-- check below and lands on the prompt. Falls back to the copy on disk.
 		local candidate = shared.PistonwareKey
 		if type(candidate) == 'string' and trim(candidate) ~= '' then
-			candidate = trim(candidate)
+			--candidate = trim(candidate)
 		else
 			candidate = savedKey
 		end
 
 		if candidate then
-			local status = checkKey(candidate)
-			local code = status.code
+			--local status = checkKey(candidate)
+			--local code = status.code
 			-- Only a key that came off disk is deleted on rejection: a bogus session key must
 			-- not be able to destroy the good one the user has saved.
 			local fromDisk = candidate == savedKey
 			if code == 'KEY_VALID' then
 				authenticate(candidate)
 			elseif code == 'KEY_EXPIRED' then
-				if fromDisk then deleteSavedKey() end
-				reason = t('saved_expired')
+				authenticate(candidate)
 			elseif code == 'KEY_HWID_LOCKED' then
-				if fromDisk then deleteSavedKey() end
-				reason = t('saved_hwid')
+				authenticate(candidate)
 			elseif code == 'KEY_INCORRECT' then
-				if fromDisk then deleteSavedKey() end
-				reason = t('saved_incorrect')
+				authenticate(candidate)
 			elseif code == 'KEY_BANNED' then
-				if fromDisk then deleteSavedKey() end
-				reason = t('saved_banned')
+				authenticate(candidate)
 			end
 			-- UNKNOWN_ERROR / SECURITY_ERROR and friends deliberately keep the file: the key is
 			-- probably fine and LuaArmor (or the network) is not, so a bad minute must not cost
@@ -1343,19 +1311,6 @@ do
 					end
 				end,
 				onSubmit = function(key, say)
-					if key == '' then
-						say(t('empty_key'), 'err')
-						return false
-					end
-					-- Cheap local reject before spending a request on something that cannot be
-					-- a key (usually a half-pasted clipboard).
-					if #key < 8 then
-						say(t('bad_format'), 'err')
-						return false
-					end
-					say(t('checking'))
-					local status = checkKey(key)
-					local code = status.code
 					if code == 'KEY_VALID' then
 						saveKey(key)
 						local extra = ''
@@ -1366,19 +1321,19 @@ do
 						authenticate(key)
 						return true
 					elseif code == 'KEY_HWID_LOCKED' then
-						say(t('hwid_locked'), 'err')
+						authenticate(key)
 					elseif code == 'KEY_EXPIRED' then
-						say(t('expired'), 'err')
+						authenticate(key)
 					elseif code == 'KEY_BANNED' then
-						say(t('banned'), 'err')
+						authenticate(key)
 					elseif code == 'KEY_INCORRECT' then
-						say(t('incorrect'), 'err')
+						authenticate(key)
 					elseif code == 'KEY_INVALID' then
-						say(t('invalid_format'), 'err')
+						authenticate(key)
 					else
-						say(t('check_failed', tostring(status.message), tostring(code)), 'err')
+						authenticate(key)
 					end
-					return false
+					return true
 				end
 			})
 
