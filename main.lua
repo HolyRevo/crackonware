@@ -221,37 +221,37 @@ local function finishLoading()
 	-- heuristic, but it is the only completion signal a payload that never returns can give us,
 	-- and it degrades safely: worst case a late module misses its settings, which is what
 	-- happened before any of this existed.
+	-- Waits until the game script has finished registering its modules, because the profile can
+	-- only be applied to modules that exist.
+	--
+	-- There are exactly two ways that finish is observable, and no third:
+	--   * an ordinary game script RETURNS, which sets gameScriptFinished
+	--   * BedWars pulls in a LuaArmor-protected payload which never returns (the VM keeps the
+	--     thread it was invoked on), so bedwars.lua sets shared.PistonwareBedwarsLoaded as its
+	--     final statement
+	--
+	-- An earlier version tried to infer completion by watching the module count go quiet. It
+	-- does not work, and cannot be made to: the first seconds of downloadBedwars() are pure
+	-- network, so nothing registers, and "nothing registering" is indistinguishable from
+	-- "finished". It declared victory at 4s -- before the payload had started -- and every
+	-- module that appeared afterwards was left on defaults. Guessing is worse than waiting.
+	--
+	-- The timeout is a backstop, not a mechanism. It only matters when the payload on LuaArmor
+	-- predates the completion flag; re-upload bedwars.lua and this returns the moment it lands.
 	local function waitForModules()
 		if gameScriptFinished then return end
 		local started = os.clock()
-		local previous, sinceChange, longestGap = -1, 0, 0
 		repeat
-			task.wait(0.25)
-			sinceChange += 0.25
-			local count = 0
-			for _ in vape.Modules do count += 1 end
-			if count ~= previous then
-				-- How far apart registrations actually are on THIS device, which is the number
-				-- the quiet window below has to beat.
-				if previous >= 0 and sinceChange > longestGap then
-					longestGap = sinceChange
-				end
-				previous, sinceChange = count, 0
-			end
-			-- Quiet for comfortably longer than the widest gap seen so far, floor of 3s. Fixed
-			-- windows do not survive slow hardware: on mobile the pauses between registrations
-			-- alone exceeded 3s, so a fixed window called the payload finished halfway through
-			-- it. This scales itself to whatever the device is doing.
-			local quietEnough = math.max(3, longestGap * 2.5)
-		until shared.PistonwareBedwarsLoaded
-			or gameScriptFinished
-			or sinceChange >= quietEnough
-			or os.clock() - started > 180
-		warn(('[pistonware] %d modules in %.1fs (%s) -- applying profile'):format(
-			previous,
-			os.clock() - started,
-			shared.PistonwareBedwarsLoaded and 'payload signalled' or 'went quiet'
-		))
+			task.wait(0.1)
+		until gameScriptFinished
+			or shared.PistonwareBedwarsLoaded
+			or os.clock() - started > 120
+		local count = 0
+		for _ in vape.Modules do count += 1 end
+		local how = shared.PistonwareBedwarsLoaded and 'payload signalled'
+			or gameScriptFinished and 'game script returned'
+			or 'TIMED OUT after 120s -- re-upload bedwars.lua to LuaArmor so it can signal when it is done'
+		warn(('[pistonware] %d modules in %.1fs (%s) -- applying profile'):format(count, os.clock() - started, how))
 	end
 
 	if gameScriptFinished then
